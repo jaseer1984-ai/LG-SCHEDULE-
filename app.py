@@ -38,13 +38,6 @@ st.markdown("""
         padding-bottom: .4rem;
         border-bottom: 2px solid #e6f3ff;
     }
-    .source-wrap {
-        background: #f8f9fa;
-        border: 2px dashed #1f4e79;
-        border-radius: 10px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -245,16 +238,12 @@ def load_detailed_data_from_source(source_url: str):
 
 # ========= UI helpers =========
 def create_source_section():
-    st.markdown('<div class="source-wrap">', unsafe_allow_html=True)
-    c1, c2 = st.columns([4,1])
-    with c1:
-        st.write("**Data source:** Google Sheets (published XLSX)")
-        st.caption(SOURCE_URL)
-    with c2:
+    """Top-right refresh button (no source text shown)."""
+    cols = st.columns([8, 1])
+    with cols[1]:
         if st.button("🔄 Refresh data", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 def create_summary_metrics(df):
     st.markdown('<div class="section-header">📊 Key Performance Indicators</div>', unsafe_allow_html=True)
@@ -433,7 +422,7 @@ def render_current_month_maturity(df_all):
 def main():
     st.markdown('<div class="main-header">🏦 LG Branch Summary Dashboard 2025</div>', unsafe_allow_html=True)
 
-    # --- Data source header + refresh ---
+    # --- Top-right refresh button (no source text) ---
     create_source_section()
 
     # Load data from SOURCE_URL

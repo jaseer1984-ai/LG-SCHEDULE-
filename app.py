@@ -526,11 +526,12 @@ def main():
     # Footer (discreet)
     st.markdown("---")
     st.markdown(
-       # f"<div style='text-align:center;color:#666;'>LG Branch Summary Dashboard • Data as of {datetime.now().strftime('%d-%m-%Y')}</div>",
+        f"<div style='text-align:center;color:#666;'>LG Branch Summary Dashboard • Data as of {datetime.now().strftime('%d-%m-%Y')}</div>",
         unsafe_allow_html=True
     )
 
 if __name__ == "__main__":
     main()
+
 
 

@@ -71,26 +71,33 @@ def load_summary_data():
 @st.cache_data
 def load_detailed_data():
     """Load detailed transaction data (sample)"""
-    # Sample detailed data based on the Excel structure
+    # Fixed number of records
+    num_records = 80
+    
+    # Create data with consistent lengths
+    banks = ['ANB', 'SAB', 'SNB', 'RB', 'NBK', 'INMA']
+    customers = [
+        'AL FOZAN TRADING', 'EL SEIF ENGINEERING', 'BETA CONSTRUCTION',
+        'ALPHA CONTRACTING', 'GAMMA TRADING', 'DELTA ENGINEERING'
+    ]
+    guarantee_types = ['ADVANCE PAYMENT', 'PERFORMANCE BOND', 'BID BOND']
+    
+    # Ensure all arrays have exactly num_records length
     detailed_data = {
-        'BANK': ['ANB', 'ANB', 'SNB', 'SNB', 'RB', 'SAB', 'NBK', 'INMA'] * 10,
-        'LG_REF': [f'LG{str(i).zfill(6)}' for i in range(1, 81)],
-        'CUSTOMER_NAME': [
-            'AL FOZAN TRADING', 'EL SEIF ENGINEERING', 'BETA CONSTRUCTION',
-            'ALPHA CONTRACTING', 'GAMMA TRADING', 'DELTA ENGINEERING'
-        ] * 14,
-        'GUARANTEE_TYPE': ['ADVANCE PAYMENT', 'PERFORMANCE BOND', 'BID BOND'] * 27,
-        'AMOUNT': np.random.uniform(10000, 500000, 80),
-        'CURRENCY': ['SAR'] * 80,
-        'BRANCH': ['BETA RIYADH'] * 80,
-        'DAYS_TO_MATURE': np.random.randint(1, 365, 80)
+        'BANK': [banks[i % len(banks)] for i in range(num_records)],
+        'LG_REF': [f'LG{str(i+1).zfill(6)}' for i in range(num_records)],
+        'CUSTOMER_NAME': [customers[i % len(customers)] for i in range(num_records)],
+        'GUARANTEE_TYPE': [guarantee_types[i % len(guarantee_types)] for i in range(num_records)],
+        'AMOUNT': np.random.uniform(10000, 500000, num_records),
+        'CURRENCY': ['SAR'] * num_records,
+        'BRANCH': ['BETA RIYADH'] * num_records,
+        'DAYS_TO_MATURE': np.random.randint(1, 365, num_records)
     }
     
     df_detailed = pd.DataFrame(detailed_data)
     
     # Add dates
-    today = datetime.now()
-    df_detailed['ISSUE_DATE'] = pd.date_range(start='2020-01-01', periods=80, freq='30D')
+    df_detailed['ISSUE_DATE'] = pd.date_range(start='2020-01-01', periods=num_records, freq='30D')
     df_detailed['EXPIRY_DATE'] = df_detailed['ISSUE_DATE'] + pd.to_timedelta(df_detailed['DAYS_TO_MATURE'], unit='D')
     
     return df_detailed

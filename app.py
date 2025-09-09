@@ -5,6 +5,9 @@ import plotly.express as px
 import numpy as np
 from datetime import datetime
 
+# ========= Source URL (Google Sheets -> Published as XLSX) =========
+SOURCE_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vS0uwaNWlivxOLwohf6kCSAkkfGTUpw5fnzwhGpoXIbymZaC8_QaHa-3ZaYz-gYEw/pub?output=xlsx"
+
 # ========= Page configuration =========
 st.set_page_config(
     page_title="LG Branch Summary Dashboard",
@@ -35,7 +38,7 @@ st.markdown("""
         padding-bottom: .4rem;
         border-bottom: 2px solid #e6f3ff;
     }
-    .upload-wrap {
+    .source-wrap {
         background: #f8f9fa;
         border: 2px dashed #1f4e79;
         border-radius: 10px;
@@ -71,16 +74,23 @@ def _format_dates_for_display(df: pd.DataFrame, cols=('ISSUE_DATE', 'EXPIRY_DATE
             d[c] = pd.to_datetime(d[c], errors='coerce').dt.strftime('%d-%m-%Y').fillna('')
     return d
 
-def _style_money(df: pd.DataFrame):
+def _style_table(df: pd.DataFrame):
     """
-    Return a Styler that formats all money-ish columns with commas.
-    Targets any column whose name contains AMOUNT / TOTAL / OUTSTANDING / FACILIT.
+    Format:
+      - Money-ish columns -> commas, no decimals
+      - DAYS / COUNT columns -> integers, no decimals
     """
     if df is None or df.empty:
         return df
-    money_cols = [c for c in df.columns
-                  if any(tok in str(c).upper() for tok in ["AMOUNT", "TOTAL", "OUTSTANDING", "FACILIT"])]
-    fmt = {c: "{:,.0f}" for c in money_cols if pd.api.types.is_numeric_dtype(df[c])}
+    fmt = {}
+    for c in df.columns:
+        cu = str(c).upper()
+        if any(tok in cu for tok in ["AMOUNT", "TOTAL", "OUTSTANDING", "FACILIT"]):
+            if pd.api.types.is_numeric_dtype(df[c]):
+                fmt[c] = "{:,.0f}"
+        if "DAYS" in cu or cu == "DAYS_TO_MATURE" or cu == "COUNT":
+            if pd.api.types.is_numeric_dtype(df[c]):
+                fmt[c] = "{:,.0f}"
     return df.style.format(fmt)
 
 def _ensure_rates_only(df_sum: pd.DataFrame) -> pd.DataFrame:
@@ -94,9 +104,9 @@ def _ensure_rates_only(df_sum: pd.DataFrame) -> pd.DataFrame:
             d["OUTSTANDING_RATE"] = (d["OUTSTANDING"] / d["TOTAL_FACILITIES"] * 100).round(2)
     return d
 
-# ========= Data loaders =========
+# ========= Data loaders (from SOURCE_URL) =========
 @st.cache_data
-def load_summary_data_from_file(uploaded_file):
+def load_summary_data_from_source(source_url: str):
     """
     Robustly extract the BANKS summary block from the 'Summary' sheet:
     headers anywhere like [BANKS | TOTAL FACILITIES | AMOUNT UTILIZED | OUTSTANDING].
@@ -124,7 +134,7 @@ def load_summary_data_from_file(uploaded_file):
         return None, None
 
     # Read raw (no header) and detect the block
-    raw = pd.read_excel(uploaded_file, sheet_name="Summary", header=None)
+    raw = pd.read_excel(source_url, sheet_name="Summary", header=None)
     start_row, cmap = _find_summary_block(raw)
     if start_row is not None:
         data = raw.iloc[start_row + 1:].copy()
@@ -134,7 +144,7 @@ def load_summary_data_from_file(uploaded_file):
         d.columns = ordered
 
         # drop totals & blanks (fixes double counting)
-        d = d[d["BANKS"].notna()]  # drop NaN first
+        d = d[d["BANKS"].notna()]
         d["BANKS"] = d["BANKS"].astype(str).str.strip()
         d = d[~d["BANKS"].str.upper().isin(["", "TOTAL", "TOTALS", "SUM", "GRAND TOTAL"])]
 
@@ -153,7 +163,7 @@ def load_summary_data_from_file(uploaded_file):
             return d
 
     # Fallback: build minimal summary from detailed
-    df_det = pd.read_excel(uploaded_file, sheet_name="LG BRANCH SUMMARY_2025", usecols="A:K")
+    df_det = pd.read_excel(source_url, sheet_name="LG BRANCH SUMMARY_2025", usecols="A:K")
     df_det = _clean_frame(df_det)
     df_det.columns = [_std(c) for c in df_det.columns]
     if "BANK" not in df_det.columns or "AMOUNT" not in df_det.columns:
@@ -168,10 +178,10 @@ def load_summary_data_from_file(uploaded_file):
     return tmp
 
 @st.cache_data
-def load_detailed_data_from_file(uploaded_file):
+def load_detailed_data_from_source(source_url: str):
     """Load detailed data (LG BRANCH SUMMARY_2025, A:K), robust to messy sheets."""
     try:
-        df = pd.read_excel(uploaded_file, sheet_name='LG BRANCH SUMMARY_2025', usecols="A:K")
+        df = pd.read_excel(source_url, sheet_name='LG BRANCH SUMMARY_2025', usecols="A:K")
         df = _clean_frame(df)
 
         expected_columns = {
@@ -190,7 +200,7 @@ def load_detailed_data_from_file(uploaded_file):
         if 'AMOUNT' in df.columns:
             df['AMOUNT'] = pd.to_numeric(df['AMOUNT'], errors='coerce').fillna(0)
         if 'DAYS_TO_MATURE' in df.columns:
-            df['DAYS_TO_MATURE'] = pd.to_numeric(df['DAYS_TO_MATURE'], errors='coerce').fillna(30)
+            df['DAYS_TO_MATURE'] = pd.to_numeric(df['DAYS_TO_MATURE'], errors='coerce').fillna(0)
         for date_col in ['ISSUE_DATE', 'EXPIRY_DATE']:
             if date_col in df.columns:
                 df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
@@ -200,6 +210,7 @@ def load_detailed_data_from_file(uploaded_file):
         if 'BRANCH' in df.columns: df['BRANCH'] = df['BRANCH'].fillna('Main Branch')
         if 'CURRENCY' in df.columns: df['CURRENCY'] = df['CURRENCY'].fillna('SAR')
 
+        # keep essential rows only
         df = df.dropna(subset=['BANK', 'GUARANTEE_TYPE'])
         df = df[df['BANK'].astype(str).str.strip() != '']
         df = df[df['GUARANTEE_TYPE'].astype(str).str.strip() != '']
@@ -208,7 +219,7 @@ def load_detailed_data_from_file(uploaded_file):
     except Exception as e:
         st.error(f"Error loading detailed data: {str(e)}")
         try:
-            df_fallback = pd.read_excel(uploaded_file, sheet_name='LG BRANCH SUMMARY_2025')
+            df_fallback = pd.read_excel(source_url, sheet_name='LG BRANCH SUMMARY_2025')
             df_fallback = _clean_frame(df_fallback)
             column_mapping = {}
             for col in df_fallback.columns:
@@ -233,21 +244,17 @@ def load_detailed_data_from_file(uploaded_file):
             return None
 
 # ========= UI helpers =========
-def create_file_upload_section():
-    st.markdown('<div class="upload-wrap">', unsafe_allow_html=True)
-    c1, c2 = st.columns([3,1])
+def create_source_section():
+    st.markdown('<div class="source-wrap">', unsafe_allow_html=True)
+    c1, c2 = st.columns([4,1])
     with c1:
-        uploaded = st.file_uploader(
-            "Upload your Excel file (sheet: **LG BRANCH SUMMARY_2025**)",
-            type=['xlsx', 'xls'],
-            help="Recommended: OUTSTANDING LGS_AS OF 2025.xlsx"
-        )
+        st.write("**Data source:** Google Sheets (published XLSX)")
+        st.caption(SOURCE_URL)
     with c2:
         if st.button("🔄 Refresh data", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
-    return uploaded
 
 def create_summary_metrics(df):
     st.markdown('<div class="section-header">📊 Key Performance Indicators</div>', unsafe_allow_html=True)
@@ -319,8 +326,7 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK', key_prefix=
             if group_cols:
                 agg_dict = {}
                 if 'AMOUNT' in df_subset.columns:
-                    agg_dict['AMOUNT'] = ['count', 'sum']  # removed 'mean'
-                # no DAYS_TO_MATURE mean
+                    agg_dict['AMOUNT'] = ['count', 'sum']  # no averages
                 if agg_dict:
                     summary_stats = df_subset.groupby(group_cols).agg(agg_dict).round(2)
                     summary_stats.columns = [
@@ -332,7 +338,7 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK', key_prefix=
                         'Amount Count': 'Count',
                         'Amount Sum': 'Total Amount',
                     })
-                    st.dataframe(_style_money(summary_stats), use_container_width=True)
+                    st.dataframe(_style_table(summary_stats), use_container_width=True)
                 else:
                     st.info("No numeric columns available to summarize.")
             else:
@@ -343,7 +349,7 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK', key_prefix=
             st.warning("No rows to display.")
         else:
             df_display = _format_dates_for_display(df_subset, cols=('ISSUE_DATE', 'EXPIRY_DATE'))
-            st.dataframe(_style_money(df_display), use_container_width=True)
+            st.dataframe(_style_table(df_display), use_container_width=True)
 
             export_df = df_subset.copy()
             for c in ('ISSUE_DATE', 'EXPIRY_DATE'):
@@ -427,17 +433,14 @@ def render_current_month_maturity(df_all):
 def main():
     st.markdown('<div class="main-header">🏦 LG Branch Summary Dashboard 2025</div>', unsafe_allow_html=True)
 
-    # --- File upload + Refresh ---
-    uploaded_file = create_file_upload_section()
-    if uploaded_file is None:
-        st.info("Please upload the Excel file to continue.")
-        st.stop()
+    # --- Data source header + refresh ---
+    create_source_section()
 
-    # Load data
-    df_summary = load_summary_data_from_file(uploaded_file)
-    df_detailed = load_detailed_data_from_file(uploaded_file)
+    # Load data from SOURCE_URL
+    df_summary = load_summary_data_from_source(SOURCE_URL)
+    df_detailed = load_detailed_data_from_source(SOURCE_URL)
     if df_summary is None or df_detailed is None or df_detailed.empty:
-        st.error("No usable data found. Check sheet names/structure and re-upload.")
+        st.error("No usable data found. Check the source sheet names/structure.")
         st.stop()
 
     # --- Simple filters (RADIO): Branch + Bank ---
@@ -508,11 +511,11 @@ def main():
                 tab1, tab2 = st.tabs(["📈 Summary Data", "📋 Detailed Transactions"])
                 with tab1:
                     st.subheader("Bank Summary")
-                    st.dataframe(_style_money(df_summary_filtered), use_container_width=True)
+                    st.dataframe(_style_table(df_summary_filtered), use_container_width=True)
                 with tab2:
                     st.subheader("Transaction Details")
                     df_display = _format_dates_for_display(df_detailed_filtered, cols=('ISSUE_DATE', 'EXPIRY_DATE'))
-                    st.dataframe(_style_money(df_display), use_container_width=True)
+                    st.dataframe(_style_table(df_display), use_container_width=True)
                     export_df = df_detailed_filtered.copy()
                     for c in ('ISSUE_DATE', 'EXPIRY_DATE'):
                         if c in export_df.columns:

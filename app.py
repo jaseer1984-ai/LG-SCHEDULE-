@@ -95,49 +95,128 @@ def load_summary_data_from_file(uploaded_file):
 def load_detailed_data_from_file(uploaded_file):
     """Load detailed data from uploaded Excel file"""
     try:
-        df = pd.read_excel(uploaded_file, sheet_name='LG BRANCH SUMMARY_2025')
+        # Read the main transaction data (columns A:K based on your images)
+        df = pd.read_excel(uploaded_file, sheet_name='LG BRANCH SUMMARY_2025', usecols="A:K")
         
-        # Clean column names
-        df.columns = df.columns.str.strip()
+        st.write("Original columns:", df.columns.tolist())
+        st.write("Data shape:", df.shape)
+        st.write("First few rows:", df.head())
         
-        # Ensure required columns exist
-        required_columns = ['BANK', 'LG REF', 'CUSTOMER NAME', 'GUARRENTY TYPE', 'AMOUNT', 'BRANCH']
-        
-        # Map actual column names to standard names
-        column_mapping = {
-            'GUARRENTY TYPE': 'GUARANTEE_TYPE',
-            'LG REF': 'LG_REF',
-            'CUSTOMER NAME': 'CUSTOMER_NAME',
-            'ISSUE DATE': 'ISSUE_DATE',
-            'EXPIRY DATE': 'EXPIRY_DATE',
-            'DAYS TO MATURE': 'DAYS_TO_MATURE'
+        # Based on your images, the exact column mapping should be:
+        expected_columns = {
+            0: 'BANK',           # Column A
+            1: 'LG_REF',         # Column B - LG REF
+            2: 'CUSTOMER_NAME',  # Column C - CUSTOMER NAME
+            3: 'GUARANTEE_TYPE', # Column D - GUARRENTY TYPE
+            4: 'ISSUE_DATE',     # Column E - ISSUE DATE
+            5: 'EXPIRY_DATE',    # Column F - EXPIRY DATE
+            6: 'AMOUNT',         # Column G - AMOUNT
+            7: 'CURRENCY',       # Column H - CURRENCY
+            8: 'BRANCH',         # Column I - BRANCH
+            9: 'BANK_2',         # Column J - BANK (duplicate)
+            10: 'DAYS_TO_MATURE' # Column K - DAYS TO MATURE
         }
         
-        df.rename(columns=column_mapping, inplace=True)
+        # Create new column names list
+        new_columns = []
+        for i, col in enumerate(df.columns):
+            if i in expected_columns:
+                new_columns.append(expected_columns[i])
+            else:
+                new_columns.append(f'Column_{i}')
         
-        # Handle missing or incorrectly named columns
-        if 'GUARANTEE_TYPE' not in df.columns and 'GUARRENTY TYPE' in df.columns:
-            df['GUARANTEE_TYPE'] = df['GUARRENTY TYPE']
+        # Apply new column names
+        df.columns = new_columns
         
-        # Add missing columns with default values if they don't exist
-        if 'CURRENCY' not in df.columns:
-            df['CURRENCY'] = 'SAR'
-            
-        if 'DAYS_TO_MATURE' not in df.columns and 'EXPIRY_DATE' in df.columns:
-            try:
-                df['EXPIRY_DATE'] = pd.to_datetime(df['EXPIRY_DATE'])
-                df['DAYS_TO_MATURE'] = (df['EXPIRY_DATE'] - datetime.now()).dt.days
-            except:
-                df['DAYS_TO_MATURE'] = np.random.randint(1, 365, len(df))
+        # Use the first BANK column and drop the duplicate
+        df = df.drop('BANK_2', axis=1, errors='ignore')
         
-        # Clean numeric columns
+        st.write("Mapped columns:", df.columns.tolist())
+        
+        # Clean and validate the data
+        # Remove header rows that might be mixed in the data
+        df = df[df['BANK'].notna()]  # Remove rows where BANK is null
+        df = df[df['BANK'] != 'BANK']  # Remove header rows
+        
+        # Clean the GUARANTEE_TYPE column (fix the typo in original)
+        if 'GUARANTEE_TYPE' in df.columns:
+            df['GUARANTEE_TYPE'] = df['GUARANTEE_TYPE'].astype(str).str.strip()
+        
+        # Convert numeric columns
         if 'AMOUNT' in df.columns:
             df['AMOUNT'] = pd.to_numeric(df['AMOUNT'], errors='coerce').fillna(0)
         
-        return df
+        if 'DAYS_TO_MATURE' in df.columns:
+            df['DAYS_TO_MATURE'] = pd.to_numeric(df['DAYS_TO_MATURE'], errors='coerce').fillna(30)
+        
+        # Convert date columns
+        for date_col in ['ISSUE_DATE', 'EXPIRY_DATE']:
+            if date_col in df.columns:
+                try:
+                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+                except:
+                    st.warning(f"Could not convert {date_col} to datetime")
+        
+        # Remove rows with missing essential data
+        df_cleaned = df.dropna(subset=['BANK', 'GUARANTEE_TYPE'])
+        df_cleaned = df_cleaned[df_cleaned['BANK'].str.strip() != '']
+        df_cleaned = df_cleaned[df_cleaned['GUARANTEE_TYPE'].str.strip() != '']
+        
+        # Fill missing values for optional columns
+        if 'LG_REF' in df_cleaned.columns:
+            df_cleaned['LG_REF'] = df_cleaned['LG_REF'].fillna('N/A')
+        
+        if 'CUSTOMER_NAME' in df_cleaned.columns:
+            df_cleaned['CUSTOMER_NAME'] = df_cleaned['CUSTOMER_NAME'].fillna('Unknown Customer')
+        
+        if 'BRANCH' in df_cleaned.columns:
+            df_cleaned['BRANCH'] = df_cleaned['BRANCH'].fillna('Main Branch')
+        
+        if 'CURRENCY' in df_cleaned.columns:
+            df_cleaned['CURRENCY'] = df_cleaned['CURRENCY'].fillna('SAR')
+        
+        st.success(f"Successfully loaded {len(df_cleaned)} records")
+        st.write("Final columns:", df_cleaned.columns.tolist())
+        st.write("Sample data:", df_cleaned.head(3))
+        
+        return df_cleaned
+        
     except Exception as e:
         st.error(f"Error loading detailed data: {str(e)}")
-        return None
+        st.write("Attempting to load with different approach...")
+        
+        # Fallback: try to read without column restrictions
+        try:
+            df_fallback = pd.read_excel(uploaded_file, sheet_name='LG BRANCH SUMMARY_2025')
+            st.write("Fallback - All columns:", df_fallback.columns.tolist())
+            
+            # Try to find the right columns by name
+            column_mapping = {}
+            for col in df_fallback.columns:
+                col_str = str(col).upper().strip()
+                if col_str == 'BANK':
+                    column_mapping[col] = 'BANK'
+                elif 'LG REF' in col_str or 'LG_REF' in col_str:
+                    column_mapping[col] = 'LG_REF'
+                elif 'CUSTOMER' in col_str:
+                    column_mapping[col] = 'CUSTOMER_NAME'
+                elif 'GUARR' in col_str or 'TYPE' in col_str:
+                    column_mapping[col] = 'GUARANTEE_TYPE'
+                elif col_str == 'AMOUNT':
+                    column_mapping[col] = 'AMOUNT'
+                elif 'BRANCH' in col_str:
+                    column_mapping[col] = 'BRANCH'
+                elif 'CURRENCY' in col_str:
+                    column_mapping[col] = 'CURRENCY'
+                elif 'DAYS' in col_str:
+                    column_mapping[col] = 'DAYS_TO_MATURE'
+            
+            df_fallback = df_fallback.rename(columns=column_mapping)
+            return df_fallback
+            
+        except Exception as e2:
+            st.error(f"Fallback also failed: {str(e2)}")
+            return None
 
 @st.cache_data
 def load_default_summary_data():

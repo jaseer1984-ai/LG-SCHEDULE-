@@ -347,9 +347,10 @@ def charts_for_subset(df_subset, title_prefix):
             st.info("Need BANK column for pie chart.")
 
 
-def render_summary_and_detailed_tables(df_subset, summary_by='BANK'):
+def render_summary_and_detailed_tables(df_subset, summary_by='BANK', key_prefix='main'):
     """Two inner tabs: Summary (grouped stats) and Detailed (rows)."""
     tab_s, tab_d = st.tabs(["📈 Summary", "📋 Detailed"])
+
     with tab_s:
         if df_subset.empty:
             st.warning("No data.")
@@ -357,10 +358,8 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK'):
             group_cols = []
             if summary_by in df_subset.columns:
                 group_cols = [summary_by]
-            else:
-                st.info(f"Column '{summary_by}' not present; summarizing by BANK if available.")
-                if 'BANK' in df_subset.columns:
-                    group_cols = ['BANK']
+            elif 'BANK' in df_subset.columns:
+                group_cols = ['BANK']
 
             if group_cols:
                 agg_dict = {}
@@ -371,11 +370,10 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK'):
 
                 if agg_dict:
                     summary_stats = df_subset.groupby(group_cols).agg(agg_dict).round(2)
-                    # flatten columns
                     summary_stats.columns = [' '.join([c for c in col if c]).strip().title().replace('_', ' ')
-                                             if isinstance(col, tuple) else str(col) for col in summary_stats.columns]
+                                             if isinstance(col, tuple) else str(col)
+                                             for col in summary_stats.columns]
                     summary_stats = summary_stats.reset_index()
-                    # rename nice labels where applicable
                     summary_stats = summary_stats.rename(columns={
                         'Amount Count': 'Count',
                         'Amount Sum': 'Total Amount',
@@ -383,7 +381,11 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK'):
                         'Days To Mature Mean': 'Avg Days to Mature'
                     })
                     st.dataframe(
-                        summary_stats.style.format({'Total Amount': '{:,.0f}', 'Avg Amount': '{:,.0f}', 'Avg Days to Mature': '{:.0f}'}),
+                        summary_stats.style.format({
+                            'Total Amount': '{:,.0f}',
+                            'Avg Amount': '{:,.0f}',
+                            'Avg Days to Mature': '{:.0f}'
+                        }),
                         use_container_width=True
                     )
                 else:
@@ -397,31 +399,31 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK'):
         else:
             df_display = _format_dates_for_display(df_subset, cols=('ISSUE_DATE', 'EXPIRY_DATE'))
             st.dataframe(df_display, use_container_width=True)
+
             # dd-mm-yyyy export
             export_df = df_subset.copy()
             for c in ('ISSUE_DATE', 'EXPIRY_DATE'):
                 if c in export_df.columns:
                     export_df[c] = pd.to_datetime(export_df[c], errors='coerce').dt.strftime('%d-%m-%Y')
+
             st.download_button(
                 label="📥 Download (current tab) CSV",
                 data=export_df.to_csv(index=False),
                 file_name=f"lg_{summary_by.lower()}_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv",
-                use_container_width=True
+                use_container_width=True,
+                key=f"dl_{key_prefix}"   # 👈 UNIQUE KEY
             )
 
 
 def render_type_tab(df_filtered, gtype):
     st.subheader(f"📋 {gtype}")
-    if 'GUARANTEE_TYPE' not in df_filtered.columns:
-        st.warning("GUARANTEE_TYPE column missing.")
-        return
     df_type = df_filtered[df_filtered['GUARANTEE_TYPE'] == gtype]
     if df_type.empty:
-        st.warning(f"No data for **{gtype}**")
-        return
-    charts_for_subset(df_type, gtype)              # Charts on top
-    render_summary_and_detailed_tables(df_type)    # Tables below
+        st.warning(f"No data for **{gtype}**"); return
+    charts_for_subset(df_type, gtype)
+    render_summary_and_detailed_tables(df_type, summary_by='BANK', key_prefix=f"type_{_std(gtype)}")  # 👈
+
 
 
 def create_maturity_analysis(df_detailed):
@@ -605,3 +607,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -1,14 +1,11 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import numpy as np
-from datetime import datetime, timedelta
-import openpyxl
+from datetime import datetime
 import io
 
-# Page configuration
+# ---------------- Page configuration ----------------
 st.set_page_config(
     page_title="LG Branch Summary Dashboard",
     page_icon="🏦",
@@ -16,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# ---------------- Custom CSS ----------------
 st.markdown("""
 <style>
     .main-header {
@@ -30,7 +27,6 @@ st.markdown("""
         border-radius: 10px;
         border-left: 5px solid #1f4e79;
     }
-    
     .metric-container {
         background: white;
         padding: 1rem;
@@ -39,7 +35,6 @@ st.markdown("""
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         margin: 0.5rem 0;
     }
-    
     .section-header {
         color: #1f4e79;
         font-size: 1.5rem;
@@ -48,7 +43,6 @@ st.markdown("""
         padding-bottom: 0.5rem;
         border-bottom: 2px solid #e6f3ff;
     }
-    
     .upload-section {
         background: #f8f9fa;
         padding: 1.5rem;
@@ -59,144 +53,174 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------- Helpers ----------------
+def _std(s: str) -> str:
+    """Normalize a header to UPPER_SNAKE (spaces/dashes -> underscores)."""
+    return str(s).strip().upper().replace(" ", "_").replace("-", "_")
+
+def _standardize_summary_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Make Summary headers consistent: BANKS, AMOUNT_UTILIZED, TOTAL_FACILITIES, OUTSTANDING."""
+    df = df.rename(columns={c: _std(c) for c in df.columns})
+
+    aliases = {
+        "BANKS": ["BANKS", "BANK"],
+        "AMOUNT_UTILIZED": ["AMOUNT_UTILIZED", "AMOUNT_UTILISED", "UTILIZED", "UTILISED", "AMOUNT_USED", "USED"],
+        "TOTAL_FACILITIES": ["TOTAL_FACILITIES", "TOTAL_FACILITY", "TOTAL_LIMIT", "FACILITY_LIMIT", "LIMIT"],
+        "OUTSTANDING": ["OUTSTANDING", "AVAILABLE", "BALANCE"],
+    }
+    for canon, names in aliases.items():
+        for name in names:
+            if name in df.columns:
+                if canon != name:
+                    df = df.rename(columns={name: canon})
+                break
+
+    if "BANKS" not in df.columns and "BANK" in df.columns:
+        df = df.rename(columns={"BANK": "BANKS"})
+    return df
+
+def _format_dates_for_display(df: pd.DataFrame, cols=('ISSUE_DATE', 'EXPIRY_DATE')) -> pd.DataFrame:
+    """Return a COPY with selected date columns formatted as dd-mm-yyyy (strings)."""
+    d = df.copy()
+    for c in cols:
+        if c in d.columns:
+            d[c] = pd.to_datetime(d[c], errors='coerce').dt.strftime('%d-%m-%Y').fillna('')
+    return d
+
+# ---------------- Data loaders ----------------
 @st.cache_data
 def load_summary_data_from_file(uploaded_file):
-    """Load summary data from uploaded Excel file"""
+    """
+    Load 'Summary' if present (robust to header variants).
+    If incomplete/missing, build summary from the detailed sheet.
+    """
+    def _ensure_metrics(df_sum: pd.DataFrame) -> pd.DataFrame:
+        # derive missing metrics if possible
+        if "TOTAL_FACILITIES" not in df_sum.columns and "AMOUNT_UTILIZED" in df_sum.columns:
+            df_sum["TOTAL_FACILITIES"] = (df_sum["AMOUNT_UTILIZED"] * 1.5).round(2)
+        if "OUTSTANDING" not in df_sum.columns and {"TOTAL_FACILITIES", "AMOUNT_UTILIZED"}.issubset(df_sum.columns):
+            df_sum["OUTSTANDING"] = (df_sum["TOTAL_FACILITIES"] - df_sum["AMOUNT_UTILIZED"]).round(2)
+
+        if {"AMOUNT_UTILIZED", "TOTAL_FACILITIES"}.issubset(df_sum.columns):
+            with np.errstate(divide='ignore', invalid='ignore'):
+                df_sum["UTILIZATION_RATE"] = (df_sum["AMOUNT_UTILIZED"] / df_sum["TOTAL_FACILITIES"] * 100).round(2)
+        if {"OUTSTANDING", "TOTAL_FACILITIES"}.issubset(df_sum.columns):
+            with np.errstate(divide='ignore', invalid='ignore'):
+                df_sum["OUTSTANDING_RATE"] = (df_sum["OUTSTANDING"] / df_sum["TOTAL_FACILITIES"] * 100).round(2)
+        return df_sum
+
+    # Try Summary sheet
     try:
-        # Read the Summary sheet or create from LG BRANCH SUMMARY_2025
+        df_sum = pd.read_excel(uploaded_file, sheet_name="Summary")
+        df_sum = _standardize_summary_columns(df_sum)
+        if not {"BANKS", "AMOUNT_UTILIZED"}.issubset(df_sum.columns):
+            raise KeyError("Summary sheet missing required headers after normalization.")
+        df_sum = _ensure_metrics(df_sum)
+        return df_sum
+
+    except Exception:
+        # Fallback to building from detailed sheet (LG BRANCH SUMMARY_2025)
         try:
-            df = pd.read_excel(uploaded_file, sheet_name='Summary')
-        except:
-            # If Summary sheet doesn't exist, create it from detailed data
-            df_detailed = pd.read_excel(uploaded_file, sheet_name='LG BRANCH SUMMARY_2025')
-            
-            # Group by bank to create summary
-            summary_data = df_detailed.groupby('BANK').agg({
-                'AMOUNT': 'sum'
-            }).reset_index()
-            
-            # Create mock summary data structure
-            summary_data.rename(columns={'AMOUNT': 'AMOUNT_UTILIZED'}, inplace=True)
-            summary_data['TOTAL_FACILITIES'] = summary_data['AMOUNT_UTILIZED'] * 1.5  # Mock total
-            summary_data['OUTSTANDING'] = summary_data['TOTAL_FACILITIES'] - summary_data['AMOUNT_UTILIZED']
-            summary_data.rename(columns={'BANK': 'BANKS'}, inplace=True)
-            df = summary_data
-            
-        # Calculate additional metrics
-        df['UTILIZATION_RATE'] = (df['AMOUNT_UTILIZED'] / df['TOTAL_FACILITIES'] * 100).round(2)
-        df['OUTSTANDING_RATE'] = (df['OUTSTANDING'] / df['TOTAL_FACILITIES'] * 100).round(2)
-        
-        return df
-    except Exception as e:
-        st.error(f"Error loading summary data: {str(e)}")
-        return None
+            df_det = pd.read_excel(uploaded_file, sheet_name="LG BRANCH SUMMARY_2025", usecols="A:K")
+            df_det.columns = [_std(c) for c in df_det.columns]
+
+            bank_col = "BANK" if "BANK" in df_det.columns else ("BANK_1" if "BANK_1" in df_det.columns else None)
+            amount_col = "AMOUNT"
+            if bank_col is None or amount_col not in df_det.columns:
+                raise KeyError("Could not find BANK/AMOUNT in detailed sheet to build summary.")
+
+            tmp = (df_det
+                   .rename(columns={bank_col: "BANKS"})
+                   .groupby("BANKS", dropna=True)[amount_col]
+                   .sum()
+                   .reset_index()
+                   .rename(columns={amount_col: "AMOUNT_UTILIZED"}))
+
+            tmp["TOTAL_FACILITIES"] = (tmp["AMOUNT_UTILIZED"] * 1.5).round(2)
+            tmp["OUTSTANDING"] = (tmp["TOTAL_FACILITIES"] - tmp["AMOUNT_UTILIZED"]).round(2)
+            tmp = _standardize_summary_columns(tmp)
+            tmp = tmp.sort_values("AMOUNT_UTILIZED", ascending=False, ignore_index=True)
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                tmp["UTILIZATION_RATE"] = (tmp["AMOUNT_UTILIZED"] / tmp["TOTAL_FACILITIES"] * 100).round(2)
+                tmp["OUTSTANDING_RATE"] = (tmp["OUTSTANDING"] / tmp["TOTAL_FACILITIES"] * 100).round(2)
+
+            st.info("Built Summary from detailed sheet (Summary sheet was missing or had unexpected headers).")
+            return tmp
+
+        except Exception as e_fallback:
+            st.error(f"Error loading summary data (Summary + fallback failed): {e_fallback}")
+            return None
 
 @st.cache_data
 def load_detailed_data_from_file(uploaded_file):
-    """Load detailed data from uploaded Excel file"""
+    """Load detailed data from uploaded Excel file (LG BRANCH SUMMARY_2025, A:K)."""
     try:
-        # Read the main transaction data (columns A:K based on your images)
         df = pd.read_excel(uploaded_file, sheet_name='LG BRANCH SUMMARY_2025', usecols="A:K")
-        
-        st.write("Original columns:", df.columns.tolist())
-        st.write("Data shape:", df.shape)
-        st.write("First few rows:", df.head())
-        
-        # Based on your images, the exact column mapping should be:
+
+        # Map by position to stable names
         expected_columns = {
-            0: 'BANK',           # Column A
-            1: 'LG_REF',         # Column B - LG REF
-            2: 'CUSTOMER_NAME',  # Column C - CUSTOMER NAME
-            3: 'GUARANTEE_TYPE', # Column D - GUARRENTY TYPE
-            4: 'ISSUE_DATE',     # Column E - ISSUE DATE
-            5: 'EXPIRY_DATE',    # Column F - EXPIRY DATE
-            6: 'AMOUNT',         # Column G - AMOUNT
-            7: 'CURRENCY',       # Column H - CURRENCY
-            8: 'BRANCH',         # Column I - BRANCH
-            9: 'BANK_2',         # Column J - BANK (duplicate)
-            10: 'DAYS_TO_MATURE' # Column K - DAYS TO MATURE
+            0: 'BANK',            # A
+            1: 'LG_REF',          # B
+            2: 'CUSTOMER_NAME',   # C
+            3: 'GUARANTEE_TYPE',  # D
+            4: 'ISSUE_DATE',      # E
+            5: 'EXPIRY_DATE',     # F
+            6: 'AMOUNT',          # G
+            7: 'CURRENCY',        # H
+            8: 'BRANCH',          # I
+            9: 'BANK_2',          # J (duplicate)
+            10: 'DAYS_TO_MATURE'  # K
         }
-        
-        # Create new column names list
-        new_columns = []
-        for i, col in enumerate(df.columns):
-            if i in expected_columns:
-                new_columns.append(expected_columns[i])
-            else:
-                new_columns.append(f'Column_{i}')
-        
-        # Apply new column names
-        df.columns = new_columns
-        
-        # Use the first BANK column and drop the duplicate
+        df.columns = [expected_columns.get(i, f'Column_{i}') for i, _ in enumerate(df.columns)]
         df = df.drop('BANK_2', axis=1, errors='ignore')
-        
-        st.write("Mapped columns:", df.columns.tolist())
-        
-        # Clean and validate the data
-        # Remove header rows that might be mixed in the data
-        df = df[df['BANK'].notna()]  # Remove rows where BANK is null
-        df = df[df['BANK'] != 'BANK']  # Remove header rows
-        
-        # Clean the GUARANTEE_TYPE column (fix the typo in original)
+
+        # Remove empty/header rows
+        df = df[df['BANK'].notna()]
+        df = df[df['BANK'] != 'BANK']
+
+        # Clean cols
         if 'GUARANTEE_TYPE' in df.columns:
             df['GUARANTEE_TYPE'] = df['GUARANTEE_TYPE'].astype(str).str.strip()
-        
-        # Convert numeric columns
+
         if 'AMOUNT' in df.columns:
             df['AMOUNT'] = pd.to_numeric(df['AMOUNT'], errors='coerce').fillna(0)
-        
+
         if 'DAYS_TO_MATURE' in df.columns:
             df['DAYS_TO_MATURE'] = pd.to_numeric(df['DAYS_TO_MATURE'], errors='coerce').fillna(30)
-        
-        # Convert date columns
+
         for date_col in ['ISSUE_DATE', 'EXPIRY_DATE']:
             if date_col in df.columns:
-                try:
-                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-                except:
-                    st.warning(f"Could not convert {date_col} to datetime")
-        
-        # Remove rows with missing essential data
-        df_cleaned = df.dropna(subset=['BANK', 'GUARANTEE_TYPE'])
-        df_cleaned = df_cleaned[df_cleaned['BANK'].str.strip() != '']
-        df_cleaned = df_cleaned[df_cleaned['GUARANTEE_TYPE'].str.strip() != '']
-        
-        # Fill missing values for optional columns
-        if 'LG_REF' in df_cleaned.columns:
-            df_cleaned['LG_REF'] = df_cleaned['LG_REF'].fillna('N/A')
-        
-        if 'CUSTOMER_NAME' in df_cleaned.columns:
-            df_cleaned['CUSTOMER_NAME'] = df_cleaned['CUSTOMER_NAME'].fillna('Unknown Customer')
-        
-        if 'BRANCH' in df_cleaned.columns:
-            df_cleaned['BRANCH'] = df_cleaned['BRANCH'].fillna('Main Branch')
-        
-        if 'CURRENCY' in df_cleaned.columns:
-            df_cleaned['CURRENCY'] = df_cleaned['CURRENCY'].fillna('SAR')
-        
-        st.success(f"Successfully loaded {len(df_cleaned)} records")
-        st.write("Final columns:", df_cleaned.columns.tolist())
-        st.write("Sample data:", df_cleaned.head(3))
-        
-        return df_cleaned
-        
+                df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+
+        # Optional fills
+        if 'LG_REF' in df.columns:
+            df['LG_REF'] = df['LG_REF'].fillna('N/A')
+        if 'CUSTOMER_NAME' in df.columns:
+            df['CUSTOMER_NAME'] = df['CUSTOMER_NAME'].fillna('Unknown Customer')
+        if 'BRANCH' in df.columns:
+            df['BRANCH'] = df['BRANCH'].fillna('Main Branch')
+        if 'CURRENCY' in df.columns:
+            df['CURRENCY'] = df['CURRENCY'].fillna('SAR')
+
+        # Keep essential rows only
+        df = df.dropna(subset=['BANK', 'GUARANTEE_TYPE'])
+        df = df[df['BANK'].astype(str).str.strip() != '']
+        df = df[df['GUARANTEE_TYPE'].astype(str).str.strip() != '']
+
+        return df
+
     except Exception as e:
         st.error(f"Error loading detailed data: {str(e)}")
-        st.write("Attempting to load with different approach...")
-        
-        # Fallback: try to read without column restrictions
+        # Fallback: try without column restriction + map by names
         try:
             df_fallback = pd.read_excel(uploaded_file, sheet_name='LG BRANCH SUMMARY_2025')
-            st.write("Fallback - All columns:", df_fallback.columns.tolist())
-            
-            # Try to find the right columns by name
             column_mapping = {}
             for col in df_fallback.columns:
-                col_str = str(col).upper().strip()
+                col_str = _std(col)
                 if col_str == 'BANK':
                     column_mapping[col] = 'BANK'
-                elif 'LG REF' in col_str or 'LG_REF' in col_str:
+                elif 'LG_REF' in col_str or col_str == 'LG_REF':
                     column_mapping[col] = 'LG_REF'
                 elif 'CUSTOMER' in col_str:
                     column_mapping[col] = 'CUSTOMER_NAME'
@@ -210,33 +234,36 @@ def load_detailed_data_from_file(uploaded_file):
                     column_mapping[col] = 'CURRENCY'
                 elif 'DAYS' in col_str:
                     column_mapping[col] = 'DAYS_TO_MATURE'
-            
+                elif 'ISSUE' in col_str:
+                    column_mapping[col] = 'ISSUE_DATE'
+                elif 'EXPIRY' in col_str:
+                    column_mapping[col] = 'EXPIRY_DATE'
             df_fallback = df_fallback.rename(columns=column_mapping)
+
+            for c in ['ISSUE_DATE', 'EXPIRY_DATE']:
+                if c in df_fallback.columns:
+                    df_fallback[c] = pd.to_datetime(df_fallback[c], errors='coerce')
+
             return df_fallback
-            
         except Exception as e2:
             st.error(f"Fallback also failed: {str(e2)}")
             return None
 
 @st.cache_data
 def load_default_summary_data():
-    """Load default summary data when no file is uploaded"""
     summary_data = {
         'BANKS': ['ANB', 'SAB', 'SNB', 'RB', 'NBK', 'INMA'],
-        'TOTAL_FACILITIES': [5000000, 5000000, 30911990, 10000000, 10000000, 124367929],
-        'AMOUNT_UTILIZED': [3503195, 3877442, 7561901, 8370935, 3774396, 124367929],
-        'OUTSTANDING': [1496805, 1122558, 23350090, 1629065, 6225604, 0]
+        'TOTAL_FACILITIES': [5_000_000, 5_000_000, 30_911_990, 10_000_000, 10_000_000, 124_367_929],
+        'AMOUNT_UTILIZED': [3_503_195, 3_877_442, 7_561_901, 8_370_935, 3_774_396, 124_367_929],
+        'OUTSTANDING': [1_496_805, 1_122_558, 23_350_090, 1_629_065, 6_225_604, 0]
     }
-    
     df = pd.DataFrame(summary_data)
     df['UTILIZATION_RATE'] = (df['AMOUNT_UTILIZED'] / df['TOTAL_FACILITIES'] * 100).round(2)
     df['OUTSTANDING_RATE'] = (df['OUTSTANDING'] / df['TOTAL_FACILITIES'] * 100).round(2)
-    
     return df
 
 @st.cache_data
 def load_default_detailed_data():
-    """Load default detailed data when no file is uploaded"""
     num_records = 80
     banks = ['ANB', 'SAB', 'SNB', 'RB', 'NBK', 'INMA']
     customers = [
@@ -245,46 +272,41 @@ def load_default_detailed_data():
     ]
     guarantee_types = ['ADVANCE PAYMENT', 'PERFORMANCE BOND', 'BID BOND']
     branches = ['BETA RIYADH', 'ALPHA JEDDAH', 'GAMMA DAMMAM']
-    
+
     detailed_data = {
         'BANK': [banks[i % len(banks)] for i in range(num_records)],
         'LG_REF': [f'LG{str(i+1).zfill(6)}' for i in range(num_records)],
         'CUSTOMER_NAME': [customers[i % len(customers)] for i in range(num_records)],
         'GUARANTEE_TYPE': [guarantee_types[i % len(guarantee_types)] for i in range(num_records)],
-        'AMOUNT': np.random.uniform(10000, 500000, num_records),
+        'AMOUNT': np.random.uniform(10_000, 500_000, num_records),
         'CURRENCY': ['SAR'] * num_records,
         'BRANCH': [branches[i % len(branches)] for i in range(num_records)],
         'DAYS_TO_MATURE': np.random.randint(1, 365, num_records)
     }
-    
     df_detailed = pd.DataFrame(detailed_data)
     df_detailed['ISSUE_DATE'] = pd.date_range(start='2020-01-01', periods=num_records, freq='30D')
     df_detailed['EXPIRY_DATE'] = df_detailed['ISSUE_DATE'] + pd.to_timedelta(df_detailed['DAYS_TO_MATURE'], unit='D')
-    
     return df_detailed
 
+# ---------------- UI builders ----------------
 def create_file_upload_section():
-    """Create file upload section"""
     st.markdown('<div class="upload-section">', unsafe_allow_html=True)
     st.markdown("### 📁 Upload Your Excel File")
-    st.markdown("Upload your **OUTSTANDING LGS_AS OF 2025.xlsx** file or any Excel file with **LG BRANCH SUMMARY_2025** sheet")
-    
+    st.markdown("Upload your **OUTSTANDING LGS_AS OF 2025.xlsx** (sheet: **LG BRANCH SUMMARY_2025**).")
+
     uploaded_file = st.file_uploader(
         "Choose Excel file",
         type=['xlsx', 'xls'],
         help="Upload Excel file containing LG data"
     )
-    
+
     if uploaded_file is not None:
         st.success(f"✅ File uploaded successfully: {uploaded_file.name}")
-        
-        # Show file info
         file_details = {
             "Filename": uploaded_file.name,
             "File size": f"{uploaded_file.size} bytes",
             "File type": uploaded_file.type
         }
-        
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Filename", file_details["Filename"])
@@ -292,68 +314,36 @@ def create_file_upload_section():
             st.metric("Size", file_details["File size"])
         with col3:
             st.metric("Type", file_details["File type"])
-    
+
     st.markdown('</div>', unsafe_allow_html=True)
-    
     return uploaded_file
 
 def create_summary_metrics(df):
-    """Create summary metrics section"""
     st.markdown('<div class="section-header">📊 Key Performance Indicators</div>', unsafe_allow_html=True)
-    
     total_facilities = df['TOTAL_FACILITIES'].sum()
     total_utilized = df['AMOUNT_UTILIZED'].sum()
     total_outstanding = df['OUTSTANDING'].sum()
     avg_utilization = df['UTILIZATION_RATE'].mean()
-    
+
     col1, col2, col3, col4 = st.columns(4)
-    
     with col1:
-        st.metric(
-            label="Total Facilities",
-            value=f"SAR {total_facilities:,.0f}",
-            help="Total credit facilities across all banks"
-        )
-    
+        st.metric("Total Facilities", f"SAR {total_facilities:,.0f}")
     with col2:
-        st.metric(
-            label="Amount Utilized",
-            value=f"SAR {total_utilized:,.0f}",
-            delta=f"{(total_utilized/total_facilities)*100:.1f}% of total",
-            help="Total amount currently utilized"
-        )
-    
+        st.metric("Amount Utilized", f"SAR {total_utilized:,.0f}", delta=f"{(total_utilized/total_facilities)*100:.1f}% of total")
     with col3:
-        st.metric(
-            label="Outstanding Amount",
-            value=f"SAR {total_outstanding:,.0f}",
-            delta=f"{(total_outstanding/total_facilities)*100:.1f}% available",
-            help="Remaining available credit"
-        )
-    
+        st.metric("Outstanding Amount", f"SAR {total_outstanding:,.0f}", delta=f"{(total_outstanding/total_facilities)*100:.1f}% available")
     with col4:
-        st.metric(
-            label="Avg Utilization Rate",
-            value=f"{avg_utilization:.1f}%",
-            help="Average utilization across all banks"
-        )
+        st.metric("Avg Utilization Rate", f"{avg_utilization:.1f}%")
 
 def create_charts_for_guarantee_type(df_filtered, guarantee_type):
-    """Create charts for specific guarantee type"""
-    
-    # Filter data for this guarantee type
     df_type = df_filtered[df_filtered['GUARANTEE_TYPE'] == guarantee_type]
-    
     if df_type.empty:
         st.warning(f"No data available for {guarantee_type}")
         return
-    
+
     col1, col2 = st.columns(2)
-    
     with col1:
-        # Amount distribution by bank
         bank_amounts = df_type.groupby('BANK')['AMOUNT'].sum().sort_values(ascending=False)
-        
         fig_bank = px.bar(
             x=bank_amounts.index,
             y=bank_amounts.values,
@@ -361,51 +351,30 @@ def create_charts_for_guarantee_type(df_filtered, guarantee_type):
             color=bank_amounts.values,
             color_continuous_scale='Blues'
         )
-        fig_bank.update_layout(
-            height=400,
-            title_x=0.5,
-            xaxis_title="Bank",
-            yaxis_title="Total Amount (SAR)",
-            showlegend=False
-        )
+        fig_bank.update_layout(height=400, title_x=0.5, xaxis_title="Bank", yaxis_title="Total Amount (SAR)", showlegend=False)
         st.plotly_chart(fig_bank, use_container_width=True)
-    
+
     with col2:
-        # Count of LGs by bank
         bank_counts = df_type.groupby('BANK').size().sort_values(ascending=False)
-        
-        fig_count = px.pie(
-            values=bank_counts.values,
-            names=bank_counts.index,
-            title=f'{guarantee_type} - Count by Bank'
-        )
+        fig_count = px.pie(values=bank_counts.values, names=bank_counts.index, title=f'{guarantee_type} - Count by Bank')
         fig_count.update_layout(height=400, title_x=0.5)
         st.plotly_chart(fig_count, use_container_width=True)
-    
-    # Summary table for this guarantee type
+
     st.subheader(f"📊 {guarantee_type} Summary")
-    
     summary_stats = df_type.groupby('BANK').agg({
         'AMOUNT': ['count', 'sum', 'mean'],
         'DAYS_TO_MATURE': 'mean'
     }).round(2)
-    
     summary_stats.columns = ['Count', 'Total Amount', 'Avg Amount', 'Avg Days to Mature']
     summary_stats = summary_stats.reset_index()
-    
     st.dataframe(
-        summary_stats.style.format({
-            'Total Amount': '{:,.0f}',
-            'Avg Amount': '{:,.0f}',
-            'Avg Days to Mature': '{:.0f}'
-        }),
+        summary_stats.style.format({'Total Amount': '{:,.0f}', 'Avg Amount': '{:,.0f}', 'Avg Days to Mature': '{:.0f}'}),
         use_container_width=True
     )
 
 def create_maturity_analysis(df_detailed):
-    """Create maturity analysis"""
     st.markdown('<div class="section-header">⏰ Maturity Analysis</div>', unsafe_allow_html=True)
-    
+
     def categorize_maturity(days):
         if days <= 30:
             return '≤ 30 days'
@@ -415,272 +384,194 @@ def create_maturity_analysis(df_detailed):
             return '91-180 days'
         else:
             return '> 180 days'
-    
+
+    df_detailed = df_detailed.copy()
     df_detailed['MATURITY_CATEGORY'] = df_detailed['DAYS_TO_MATURE'].apply(categorize_maturity)
-    
+
     col1, col2 = st.columns(2)
-    
     with col1:
         maturity_dist = df_detailed['MATURITY_CATEGORY'].value_counts()
-        fig_maturity = px.pie(
-            values=maturity_dist.values,
-            names=maturity_dist.index,
-            title='LG Distribution by Time to Maturity'
-        )
+        fig_maturity = px.pie(values=maturity_dist.values, names=maturity_dist.index, title='LG Distribution by Time to Maturity')
         fig_maturity.update_layout(height=400, title_x=0.5)
         st.plotly_chart(fig_maturity, use_container_width=True)
-    
+
     with col2:
         maturity_bank = df_detailed.groupby(['BANK', 'MATURITY_CATEGORY']).size().reset_index(name='count')
         fig_bank_maturity = px.bar(
-            maturity_bank,
-            x='BANK',
-            y='count',
-            color='MATURITY_CATEGORY',
-            title='Maturity Distribution by Bank',
-            barmode='stack'
+            maturity_bank, x='BANK', y='count', color='MATURITY_CATEGORY',
+            title='Maturity Distribution by Bank', barmode='stack'
         )
         fig_bank_maturity.update_layout(height=400, title_x=0.5)
         st.plotly_chart(fig_bank_maturity, use_container_width=True)
 
+# ---------------- Main ----------------
 def main():
-    """Main dashboard function"""
     try:
         # Header
         st.markdown('<div class="main-header">🏦 LG Branch Summary Dashboard 2025</div>', unsafe_allow_html=True)
-        
-        # File upload section
+
+        # Upload
         uploaded_file = create_file_upload_section()
-        
-        # Load data based on file upload
-        df_summary = None
-        df_detailed = None
-        
+
+        # Load data (uploaded or default)
+        df_summary, df_detailed = None, None
         if uploaded_file is not None:
             try:
                 df_summary = load_summary_data_from_file(uploaded_file)
                 df_detailed = load_detailed_data_from_file(uploaded_file)
-                
                 if df_summary is None or df_detailed is None:
                     st.error("Failed to load data from uploaded file. Using default data.")
                     raise Exception("Failed to load uploaded file")
-                    
             except Exception as e:
                 st.error(f"Error processing uploaded file: {str(e)}")
-                df_summary = None
-                df_detailed = None
-        
-        # Use default data if file loading failed or no file uploaded
+                df_summary, df_detailed = None, None
+
         if df_summary is None or df_detailed is None:
             if uploaded_file is None:
                 st.info("📝 No file uploaded. Using sample data for demonstration.")
-            try:
-                df_summary = load_default_summary_data()
-                df_detailed = load_default_detailed_data()
-            except Exception as e:
-                st.error(f"Critical error loading default data: {str(e)}")
-                st.stop()
-        
-        # Verify data is loaded
+            df_summary = load_default_summary_data()
+            df_detailed = load_default_detailed_data()
+
         if df_summary is None or df_detailed is None or df_detailed.empty:
             st.error("No data could be loaded. Please refresh the page and try again.")
             st.stop()
-        
+
         # Sidebar filters
         st.sidebar.title("🔧 Dashboard Filters")
         st.sidebar.markdown("---")
-        
-        # Bank filter (multiselect)
+
         available_banks = df_detailed['BANK'].unique().tolist() if 'BANK' in df_detailed.columns else []
         selected_banks = st.sidebar.multiselect(
-            "🏦 Select Banks",
-            options=available_banks,
-            default=available_banks,
-            help="Filter banks to display in charts"
+            "🏦 Select Banks", options=available_banks, default=available_banks, help="Filter banks to display in charts"
         )
-        
-        # Branch filter (radio buttons)
+
         st.sidebar.markdown("### 🏢 Branch Filter")
         available_branches = ['All']
         if 'BRANCH' in df_detailed.columns:
-            branch_values = df_detailed['BRANCH'].dropna().unique().tolist()
-            available_branches.extend(branch_values)
-        
-        selected_branch = st.sidebar.radio(
-            "Select Branch",
-            options=available_branches,
-            help="Filter by branch location"
-        )
-        
-        # Bank filter (radio buttons) - secondary filter
+            available_branches += sorted([b for b in df_detailed['BRANCH'].dropna().unique().tolist()])
+        selected_branch = st.sidebar.radio("Select Branch", options=available_branches, help="Filter by branch location")
+
         st.sidebar.markdown("### 🏦 Bank Filter (Secondary)")
-        available_banks_radio = ['All']
-        if 'BANK' in df_detailed.columns:
-            bank_values = df_detailed['BANK'].dropna().unique().tolist()
-            available_banks_radio.extend(bank_values)
-        
-        selected_bank_radio = st.sidebar.radio(
-            "Select Specific Bank",
-            options=available_banks_radio,
-            help="Focus on specific bank"
-        )
-        
-        # Apply filters safely
+        available_banks_radio = ['All'] + available_banks
+        selected_bank_radio = st.sidebar.radio("Select Specific Bank", options=available_banks_radio, help="Focus on specific bank")
+
+        # Apply filters
         df_detailed_filtered = df_detailed.copy()
-        
         try:
-            # Apply multiselect bank filter
             if selected_banks and 'BANK' in df_detailed_filtered.columns:
                 df_detailed_filtered = df_detailed_filtered[df_detailed_filtered['BANK'].isin(selected_banks)]
-            
-            # Apply branch filter
             if selected_branch != 'All' and 'BRANCH' in df_detailed_filtered.columns:
                 df_detailed_filtered = df_detailed_filtered[df_detailed_filtered['BRANCH'] == selected_branch]
-            
-            # Apply radio bank filter
             if selected_bank_radio != 'All' and 'BANK' in df_detailed_filtered.columns:
                 df_detailed_filtered = df_detailed_filtered[df_detailed_filtered['BANK'] == selected_bank_radio]
-        
         except Exception as e:
             st.warning(f"Error applying filters: {str(e)}. Using unfiltered data.")
             df_detailed_filtered = df_detailed.copy()
-        
-        # Filter summary data based on selected banks
+
+        # Filter summary to selected banks (handles BANKS or BANK)
         try:
-            if selected_banks and 'BANKS' in df_summary.columns:
-                df_summary_filtered = df_summary[df_summary['BANKS'].isin(selected_banks)]
+            df_summary_cols = {c.upper(): c for c in df_summary.columns}
+            bank_hdr = df_summary_cols.get("BANKS") or df_summary_cols.get("BANK")
+            if selected_banks and bank_hdr:
+                df_summary_filtered = df_summary[df_summary[bank_hdr].isin(selected_banks)]
             else:
                 df_summary_filtered = df_summary.copy()
-        except:
+        except Exception:
             df_summary_filtered = df_summary.copy()
-        
-        # Display current filters
+
+        # Current filters + Last Updated (DATE ONLY)
         st.sidebar.markdown("---")
         st.sidebar.markdown("### 📊 Current Filters")
         st.sidebar.write(f"**Banks:** {', '.join(selected_banks) if selected_banks else 'None'}")
         st.sidebar.write(f"**Branch:** {selected_branch}")
         st.sidebar.write(f"**Focus Bank:** {selected_bank_radio}")
         st.sidebar.write(f"**Records:** {len(df_detailed_filtered)}")
-        
-        # Display date and time
+
         st.sidebar.markdown("---")
-        st.sidebar.markdown(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        st.sidebar.markdown(f"**Last Updated:** {datetime.now().strftime('%d-%m-%Y')}")
         if uploaded_file:
             st.sidebar.markdown(f"**Data Source:** {uploaded_file.name}")
         else:
             st.sidebar.markdown("**Data Source:** Sample Data")
-        
-        # Summary metrics
+
+        # KPIs
         if not df_summary_filtered.empty:
-            try:
-                create_summary_metrics(df_summary_filtered)
-            except Exception as e:
-                st.warning(f"Error creating summary metrics: {str(e)}")
-        
-        # Create tabs based on Guarantee Type (Column D)
+            create_summary_metrics(df_summary_filtered)
+
+        # Tabs by Guarantee Type
         if 'GUARANTEE_TYPE' in df_detailed_filtered.columns:
             guarantee_types = df_detailed_filtered['GUARANTEE_TYPE'].dropna().unique().tolist()
-            
             if guarantee_types:
                 st.markdown('<div class="section-header">📋 Analysis by Guarantee Type</div>', unsafe_allow_html=True)
-                
-                # Create tabs for each guarantee type
                 tab_names = guarantee_types + ["🔄 All Types", "📊 Summary Tables"]
                 tabs = st.tabs(tab_names)
-                
-                # Individual guarantee type tabs
-                for i, guarantee_type in enumerate(guarantee_types):
+
+                # Individual type tabs
+                for i, gtype in enumerate(guarantee_types):
                     with tabs[i]:
-                        try:
-                            st.subheader(f"📋 {guarantee_type} Analysis")
-                            create_charts_for_guarantee_type(df_detailed_filtered, guarantee_type)
-                        except Exception as e:
-                            st.error(f"Error creating charts for {guarantee_type}: {str(e)}")
-                
-                # All types combined tab
+                        st.subheader(f"📋 {gtype} Analysis")
+                        create_charts_for_guarantee_type(df_detailed_filtered, gtype)
+
+                # All types combined
                 with tabs[len(guarantee_types)]:
-                    try:
-                        st.subheader("🔄 All Guarantee Types Combined")
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            # Overall distribution by guarantee type
-                            type_counts = df_detailed_filtered['GUARANTEE_TYPE'].value_counts()
-                            fig_types = px.pie(
-                                values=type_counts.values,
-                                names=type_counts.index,
-                                title='Distribution by Guarantee Type'
+                    st.subheader("🔄 All Guarantee Types Combined")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        type_counts = df_detailed_filtered['GUARANTEE_TYPE'].value_counts()
+                        fig_types = px.pie(values=type_counts.values, names=type_counts.index, title='Distribution by Guarantee Type')
+                        fig_types.update_layout(height=400, title_x=0.5)
+                        st.plotly_chart(fig_types, use_container_width=True)
+                    with col2:
+                        if 'AMOUNT' in df_detailed_filtered.columns:
+                            type_amounts = df_detailed_filtered.groupby('GUARANTEE_TYPE')['AMOUNT'].sum().sort_values(ascending=False)
+                            fig_amounts = px.bar(
+                                x=type_amounts.index, y=type_amounts.values, title='Total Amount by Guarantee Type',
+                                color=type_amounts.values, color_continuous_scale='Viridis'
                             )
-                            fig_types.update_layout(height=400, title_x=0.5)
-                            st.plotly_chart(fig_types, use_container_width=True)
-                        
-                        with col2:
-                            # Amount by guarantee type
-                            if 'AMOUNT' in df_detailed_filtered.columns:
-                                type_amounts = df_detailed_filtered.groupby('GUARANTEE_TYPE')['AMOUNT'].sum().sort_values(ascending=False)
-                                fig_amounts = px.bar(
-                                    x=type_amounts.index,
-                                    y=type_amounts.values,
-                                    title='Total Amount by Guarantee Type',
-                                    color=type_amounts.values,
-                                    color_continuous_scale='Viridis'
-                                )
-                                fig_amounts.update_layout(height=400, title_x=0.5, showlegend=False)
-                                st.plotly_chart(fig_amounts, use_container_width=True)
-                        
-                        # Maturity analysis
-                        if 'DAYS_TO_MATURE' in df_detailed_filtered.columns:
-                            create_maturity_analysis(df_detailed_filtered)
-                            
-                    except Exception as e:
-                        st.error(f"Error creating combined analysis: {str(e)}")
-                
-                # Summary tables tab
+                            fig_amounts.update_layout(height=400, title_x=0.5, showlegend=False)
+                            st.plotly_chart(fig_amounts, use_container_width=True)
+
+                    if 'DAYS_TO_MATURE' in df_detailed_filtered.columns:
+                        create_maturity_analysis(df_detailed_filtered)
+
+                # Summary tables (with date formatting for display)
                 with tabs[len(guarantee_types) + 1]:
-                    try:
-                        st.subheader("📊 Data Tables")
-                        
-                        tab1, tab2 = st.tabs(["📈 Summary Data", "📋 Detailed Transactions"])
-                        
-                        with tab1:
-                            st.subheader("Bank Summary")
-                            if not df_summary_filtered.empty:
-                                st.dataframe(df_summary_filtered, use_container_width=True)
-                        
-                        with tab2:
-                            st.subheader("Transaction Details")
-                            if not df_detailed_filtered.empty:
-                                st.dataframe(df_detailed_filtered, use_container_width=True)
-                                
-                                # Export option
-                                if st.button("📥 Download Filtered Data as CSV"):
-                                    csv = df_detailed_filtered.to_csv(index=False)
-                                    st.download_button(
-                                        label="Download CSV",
-                                        data=csv,
-                                        file_name=f"lg_data_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                        mime="text/csv"
-                                    )
-                    except Exception as e:
-                        st.error(f"Error creating data tables: {str(e)}")
-            
+                    st.subheader("📊 Data Tables")
+                    tab1, tab2 = st.tabs(["📈 Summary Data", "📋 Detailed Transactions"])
+                    with tab1:
+                        st.subheader("Bank Summary")
+                        if not df_summary_filtered.empty:
+                            st.dataframe(df_summary_filtered, use_container_width=True)
+                    with tab2:
+                        st.subheader("Transaction Details")
+                        if not df_detailed_filtered.empty:
+                            df_display = _format_dates_for_display(df_detailed_filtered, cols=('ISSUE_DATE', 'EXPIRY_DATE'))
+                            st.dataframe(df_display, use_container_width=True)
+
+                            csv = df_detailed_filtered.to_csv(index=False)  # keep raw datetimes in download
+                            st.download_button(
+                                label="📥 Download Filtered Data as CSV",
+                                data=csv,
+                                file_name=f"lg_data_filtered_{datetime.now().strftime('%Y%m%d')}.csv",
+                                mime="text/csv",
+                                use_container_width=True
+                            )
             else:
                 st.warning("⚠️ No guarantee types found in the data.")
-        
         else:
             st.warning("⚠️ GUARANTEE_TYPE column not found in the data. Please check your Excel file structure.")
             st.write("Available columns:", df_detailed_filtered.columns.tolist())
-        
+
         # Footer
         st.markdown("---")
         st.markdown(
             "<div style='text-align: center; color: #666;'>"
-            "LG Branch Summary Dashboard • Built with Streamlit • Data as of September 2025"
+            "LG Branch Summary Dashboard • Built with Streamlit • Data as of "
+            f"{datetime.now().strftime('%d-%m-%Y')}"
             "</div>",
             unsafe_allow_html=True
         )
-        
+
     except Exception as e:
         st.error(f"Critical application error: {str(e)}")
         st.error("Please refresh the page and try again. If the problem persists, check your data file format.")

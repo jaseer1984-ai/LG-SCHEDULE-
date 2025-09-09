@@ -232,12 +232,12 @@ def load_detailed_data_from_file(uploaded_file):
 def get_uploaded_file():
     """
     Show uploader only if nothing in session. After user uploads once, we conceal the widget.
+    (Uses st.rerun – the supported API.)
     """
     if "uploaded_file" not in st.session_state:
         st.session_state["uploaded_file"] = None
 
     if st.session_state["uploaded_file"] is None:
-        # Compact uploader without labels
         uploaded = st.file_uploader(
             " ",
             type=['xlsx', 'xls'],
@@ -246,10 +246,9 @@ def get_uploaded_file():
         )
         if uploaded is not None:
             st.session_state["uploaded_file"] = uploaded
-            # immediately rerun to hide the uploader
-            st.experimental_rerun()
-
+            st.rerun()  # <- replace experimental_rerun
     return st.session_state["uploaded_file"]
+
 
 def create_summary_metrics(df):
     st.markdown('<div class="section-header">📊 Key Performance Indicators</div>', unsafe_allow_html=True)
@@ -478,3 +477,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

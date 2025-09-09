@@ -10,7 +10,7 @@ st.set_page_config(
     page_title="LG Branch Summary Dashboard",
     page_icon="🏦",
     layout="wide",
-    initial_sidebar_state="collapsed"  # 👈 hide sidebar
+    initial_sidebar_state="collapsed"
 )
 
 # ========= Minimal, clean CSS =========
@@ -35,10 +35,13 @@ st.markdown("""
         padding-bottom: .4rem;
         border-bottom: 2px solid #e6f3ff;
     }
-    /* Hide the default help tooltips icon spacing a bit */
-    [data-testid="stHelp"] { margin-left: .25rem; }
-    /* Hide the "Uploaded file" green banner completely */
-    .uploadedFile { display: none !important; }
+    .upload-wrap {
+        background: #f8f9fa;
+        border: 2px dashed #1f4e79;
+        border-radius: 10px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -228,27 +231,22 @@ def load_detailed_data_from_file(uploaded_file):
             st.error(f"Fallback also failed: {str(e2)}")
             return None
 
-# ========= UI helpers (no sidebar; uploader hidden after success) =========
-def get_uploaded_file():
-    """
-    Show uploader only if nothing in session. After user uploads once, we conceal the widget.
-    (Uses st.rerun – the supported API.)
-    """
-    if "uploaded_file" not in st.session_state:
-        st.session_state["uploaded_file"] = None
-
-    if st.session_state["uploaded_file"] is None:
+# ========= UI helpers =========
+def create_file_upload_section():
+    st.markdown('<div class="upload-wrap">', unsafe_allow_html=True)
+    c1, c2 = st.columns([3,1])
+    with c1:
         uploaded = st.file_uploader(
-            " ",
+            "Upload your Excel file (sheet: **LG BRANCH SUMMARY_2025**)",
             type=['xlsx', 'xls'],
-            label_visibility="collapsed",
-            help="Upload OUTSTANDING LGS_AS OF 2025.xlsx (sheet: LG BRANCH SUMMARY_2025)"
+            help="Recommended: OUTSTANDING LGS_AS OF 2025.xlsx"
         )
-        if uploaded is not None:
-            st.session_state["uploaded_file"] = uploaded
-            st.rerun()  # <- replace experimental_rerun
-    return st.session_state["uploaded_file"]
-
+    with c2:
+        if st.button("🔄 Refresh data", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+    return uploaded
 
 def create_summary_metrics(df):
     st.markdown('<div class="section-header">📊 Key Performance Indicators</div>', unsafe_allow_html=True)
@@ -369,8 +367,10 @@ def render_type_tab(df_filtered, gtype):
     if df_type.empty:
         st.warning(f"No data for **{gtype}**")
         return
-    charts_for_subset(df_type, gtype)                                   # Charts on top
-    render_summary_and_detailed_tables(df_type, 'BANK', f"type_{_std(gtype)}")  # Tables below
+
+    # 👉 TABLES FIRST, then charts
+    render_summary_and_detailed_tables(df_type, 'BANK', f"type_{_std(gtype)}")
+    charts_for_subset(df_type, gtype)
 
 def create_maturity_analysis(df_detailed):
     st.markdown('<div class="section-header">⏰ Maturity Analysis</div>', unsafe_allow_html=True)
@@ -403,61 +403,96 @@ def create_maturity_analysis(df_detailed):
 def main():
     st.markdown('<div class="main-header">🏦 LG Branch Summary Dashboard 2025</div>', unsafe_allow_html=True)
 
-    uploaded_file = get_uploaded_file()
+    # --- File upload + Refresh ---
+    uploaded_file = create_file_upload_section()
     if uploaded_file is None:
-        # Show a tiny hint only if no file is uploaded yet
-        st.info("Upload **OUTSTANDING LGS_AS OF 2025.xlsx** (sheet: **LG BRANCH SUMMARY_2025**).")
+        st.info("Please upload the Excel file to continue.")
         st.stop()
 
-    # Load data from the already-uploaded file
+    # Load data
     df_summary = load_summary_data_from_file(uploaded_file)
     df_detailed = load_detailed_data_from_file(uploaded_file)
     if df_summary is None or df_detailed is None or df_detailed.empty:
         st.error("No usable data found. Check sheet names/structure and re-upload.")
         st.stop()
 
-    # KPIs block (no filters/sidebar)
-    if not df_summary.empty:
-        df_summary = _ensure_rates_only(df_summary)
-        create_summary_metrics(df_summary)
+    # --- Simple filters (RADIO): Branch + Bank ---
+    st.markdown('<div class="section-header">🔧 Filters</div>', unsafe_allow_html=True)
+    cols = st.columns(2)
+    with cols[0]:
+        branches = ['All']
+        if 'BRANCH' in df_detailed.columns:
+            branches += sorted([b for b in df_detailed['BRANCH'].dropna().unique().tolist()])
+        selected_branch = st.radio("Branch", options=branches, horizontal=True)
+    with cols[1]:
+        banks_radio = ['All']
+        if 'BANK' in df_detailed.columns:
+            banks_radio += sorted(df_detailed['BANK'].dropna().unique().tolist())
+        selected_bank_radio = st.radio("Bank", options=banks_radio, horizontal=True)
+
+    # Apply filters (detailed)
+    df_detailed_filtered = df_detailed.copy()
+    if selected_branch != 'All' and 'BRANCH' in df_detailed_filtered.columns:
+        df_detailed_filtered = df_detailed_filtered[df_detailed_filtered['BRANCH'] == selected_branch]
+    if selected_bank_radio != 'All' and 'BANK' in df_detailed_filtered.columns:
+        df_detailed_filtered = df_detailed_filtered[df_detailed_filtered['BANK'] == selected_bank_radio]
+
+    # Filter summary (if a bank is chosen)
+    try:
+        df_summary_cols = {c.upper(): c for c in df_summary.columns}
+        bank_hdr = df_summary_cols.get("BANKS") or df_summary_cols.get("BANK")
+        if selected_bank_radio != 'All' and bank_hdr:
+            df_summary_filtered = df_summary[df_summary[bank_hdr] == selected_bank_radio]
+        else:
+            df_summary_filtered = df_summary.copy()
+    except Exception:
+        df_summary_filtered = df_summary.copy()
+
+    # KPIs block
+    if not df_summary_filtered.empty:
+        df_summary_filtered = _ensure_rates_only(df_summary_filtered)
+        create_summary_metrics(df_summary_filtered)
 
     # Tabs by Guarantee Type
-    if 'GUARANTEE_TYPE' in df_detailed.columns:
-        guarantee_types = df_detailed['GUARANTEE_TYPE'].dropna().unique().tolist()
+    if 'GUARANTEE_TYPE' in df_detailed_filtered.columns:
+        guarantee_types = df_detailed_filtered['GUARANTEE_TYPE'].dropna().unique().tolist()
         if guarantee_types:
             st.markdown('<div class="section-header">📋 Analysis by Guarantee Type</div>', unsafe_allow_html=True)
             tabs = st.tabs(guarantee_types + ["🔄 All Types", "📊 Summary Tables"])
 
+            # Each guarantee type tab (TABLES FIRST, then CHARTS)
             for i, gtype in enumerate(guarantee_types):
                 with tabs[i]:
-                    render_type_tab(df_detailed, gtype)
+                    render_type_tab(df_detailed_filtered, gtype)
 
+            # All Types tab — TABLES first, then charts + maturity
             with tabs[len(guarantee_types)]:
                 st.subheader("🔄 All Guarantee Types (Combined)")
-                charts_for_subset(df_detailed, "All Types")
                 render_summary_and_detailed_tables(
-                    df_detailed, summary_by='GUARANTEE_TYPE', key_prefix="all_types"
+                    df_detailed_filtered, summary_by='GUARANTEE_TYPE', key_prefix="all_types"
                 )
-                create_maturity_analysis(df_detailed)
+                charts_for_subset(df_detailed_filtered, "All Types")
+                create_maturity_analysis(df_detailed_filtered)
 
+            # Summary Tables tab
             with tabs[len(guarantee_types) + 1]:
                 st.subheader("📊 Data Tables")
                 tab1, tab2 = st.tabs(["📈 Summary Data", "📋 Detailed Transactions"])
                 with tab1:
                     st.subheader("Bank Summary")
-                    st.dataframe(_style_money(df_summary), use_container_width=True)
+                    st.dataframe(_style_money(df_summary_filtered), use_container_width=True)
                 with tab2:
                     st.subheader("Transaction Details")
-                    df_display = _format_dates_for_display(df_detailed, cols=('ISSUE_DATE', 'EXPIRY_DATE'))
+                    df_display = _format_dates_for_display(df_detailed_filtered, cols=('ISSUE_DATE', 'EXPIRY_DATE'))
                     st.dataframe(_style_money(df_display), use_container_width=True)
-                    export_df = df_detailed.copy()
+                    export_df = df_detailed_filtered.copy()
                     for c in ('ISSUE_DATE', 'EXPIRY_DATE'):
                         if c in export_df.columns:
                             export_df[c] = pd.to_datetime(export_df[c], errors='coerce').dt.strftime('%d-%m-%Y')
                     st.download_button(
                         label="📥 Download Filtered Data as CSV",
                         data=export_df.to_csv(index=False),
-                        file_name=f"lg_data_all_{datetime.now().strftime('%Y%m%d')}.csv",
+                        file_name=f"lg_data_filtered_{datetime.now().strftime('%Y%m%d')}.csv",
                         mime="text/csv",
                         use_container_width=True,
                         key="dl_filtered_main"
@@ -466,7 +501,7 @@ def main():
             st.warning("⚠️ No guarantee types found in the data.")
     else:
         st.warning("⚠️ GUARANTEE_TYPE column not found in the data. Please check your Excel file structure.")
-        st.write("Available columns:", df_detailed.columns.tolist())
+        st.write("Available columns:", df_detailed_filtered.columns.tolist())
 
     # Footer (discreet)
     st.markdown("---")
@@ -477,4 +512,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

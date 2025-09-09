@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-# Tawsif Travel & Tourism — BI Dashboard
-# - Hides file-uploader UI & messages after a successful upload
-# - Dates shown as dd-mm-yyyy (no time) in tables, footer, and chart axes
-# - Safe date picker (single-day vs range), branch filter, KPIs, charts, tables
+# Tawsif Travel & Tourism — BI Dashboard (Dates fixed to dd-mm-yyyy, no time)
+# - Robust Excel loader + sheet name mapping
+# - Data validation + normalization
+# - Safe date picker (single-day vs range)
+# - Branch filter
+# - KPIs, charts, and detailed tables
+# - Dates display as dd-mm-yyyy in tables, footer, and chart axes
 
 import io
 from datetime import datetime, date, timedelta
@@ -35,6 +38,8 @@ st.markdown("""
     .metric-card {background: white;padding: 20px;border-radius: 10px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);border-left: 4px solid #2a5298;
         margin-bottom: 20px;}
+    .upload-section {background: #f8f9fa;padding: 20px;border-radius: 10px;
+        margin-bottom: 20px;border: 2px dashed #2a5298;}
     .sidebar .sidebar-content {background: linear-gradient(180deg, #f8f9fa 0%, #e9ecef 100%);}
     .stSelectbox > div > div {background-color: #f8f9fa;}
     .success-message {background: #d4edda;border: 1px solid #c3e6cb;border-radius: 5px;
@@ -52,14 +57,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ---------------- Session init ----------------
-if 'data_loaded' not in st.session_state:
-    st.session_state.data_loaded = False
-if 'data_dict' not in st.session_state:
-    st.session_state.data_dict = {}
-if 'show_uploader' not in st.session_state:
-    st.session_state.show_uploader = True  # control showing/hiding the uploader block
-
 # ---------------- Helpers ----------------
 SHEET_MAPPING = {
     'Daily_Summary': ['Daily_Summary', 'Daily Summary', 'daily_summary', 'Summary'],
@@ -69,96 +66,223 @@ SHEET_MAPPING = {
     'Bank_Balances': ['Bank_Balances', 'Bank Balances', 'bank_balances', 'Banks'],
 }
 
+REQUIRED_STRUCTURE = {
+    'Daily_Summary': ['Date', 'Daily Sales', 'Cash Balance', 'Bank Balance'],
+    'Tickets_By_Airline': ['Date', 'Branch', 'Airline', 'Tickets Issued'],
+    'Airline_Sales': ['Date', 'Branch', 'Airline', 'Sales'],
+    'Staff_Sales': ['Date', 'Branch', 'Staff', 'Tickets Issued', 'Sales'],
+    'Bank_Balances': ['Date', 'Branch', 'Bank', 'Balance'],
+}
+
+COLUMN_ALTERNATIVES = {
+    'Daily Sales': ['Daily_Sales', 'daily_sales', 'Sales', 'Total Sales'],
+    'Cash Balance': ['Cash_Balance', 'cash_balance', 'Cash'],
+    'Bank Balance': ['Bank_Balance', 'bank_balance', 'Bank'],
+    'Tickets Issued': ['Tickets_Issued', 'tickets_issued', 'Tickets'],
+    'Balance': ['balance', 'Amount', 'amount'],
+}
+
 NORMALIZE_MAP = {
     'Daily_Summary': {
         'Daily_Sales': 'Daily Sales', 'daily_sales': 'Daily Sales', 'Sales': 'Daily Sales', 'Total Sales': 'Daily Sales',
         'Cash_Balance': 'Cash Balance', 'cash_balance': 'Cash Balance', 'Cash': 'Cash Balance',
         'Bank_Balance': 'Bank Balance', 'bank_balance': 'Bank Balance', 'Bank': 'Bank Balance',
     },
-    'Tickets_By_Airline': {'Tickets_Issued': 'Tickets Issued', 'tickets_issued': 'Tickets Issued', 'Tickets': 'Tickets Issued'},
-    'Staff_Sales': {'Tickets_Issued': 'Tickets Issued', 'tickets_issued': 'Tickets Issued', 'Tickets': 'Tickets Issued'},
-    'Bank_Balances': {'balance': 'Balance', 'Amount': 'Balance', 'amount': 'Balance'},
+    'Tickets_By_Airline': {
+        'Tickets_Issued': 'Tickets Issued', 'tickets_issued': 'Tickets Issued', 'Tickets': 'Tickets Issued',
+    },
+    'Staff_Sales': {
+        'Tickets_Issued': 'Tickets Issued', 'tickets_issued': 'Tickets Issued', 'Tickets': 'Tickets Issued',
+    },
+    'Bank_Balances': {
+        'balance': 'Balance', 'Amount': 'Balance', 'amount': 'Balance',
+    },
 }
 
 @st.cache_data
 def load_excel_data(uploaded_file):
     """
     Read Excel sheets; map sheet names; ensure Date is python date (no time).
-    Returns a dict of expected sheets if they exist.
     """
     excel_data = pd.read_excel(uploaded_file, sheet_name=None)
-    available = list(excel_data.keys())
+    available_sheets = list(excel_data.keys())
     mapped = {}
 
+    # Map expected names -> first found candidate
     for expected, candidates in SHEET_MAPPING.items():
         found = None
         for c in candidates:
-            if c in available:
+            if c in available_sheets:
                 found = c
                 break
         if found:
             df = excel_data[found].copy()
             df.columns = df.columns.str.strip()
+
             if 'Date' in df.columns:
-                df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date  # drop time
+                # Convert to date (not datetime) → eliminates 00:00:00
+                df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
+
             mapped[expected] = df
 
-    # Normalize columns
+    return mapped, available_sheets
+
+def validate_data_structure(data_dict):
+    msgs, ok = [], True
+    for sheet_name, req_cols in REQUIRED_STRUCTURE.items():
+        if sheet_name not in data_dict:
+            msgs.append(f"❌ Missing sheet: {sheet_name}")
+            ok = False
+            continue
+
+        df = data_dict[sheet_name]
+        if df.empty:
+            msgs.append(f"⚠️ Sheet '{sheet_name}' is empty")
+            ok = False
+            continue
+
+        df_cols = [c.strip() for c in df.columns]
+        missing = []
+        for rc in req_cols:
+            if rc in df_cols:
+                continue
+            # try alternatives
+            alts = COLUMN_ALTERNATIVES.get(rc, [])
+            found = any(a in df_cols for a in alts)
+            if not found:
+                missing.append(rc)
+
+        if missing:
+            msgs.append(f"❌ Sheet '{sheet_name}' missing columns: {missing}")
+            msgs.append(f"   Available columns: {df_cols}")
+            ok = False
+        else:
+            msgs.append(f"✅ Sheet '{sheet_name}': {len(df)} records")
+    return ok, msgs
+
+def normalize_column_names(data_dict):
     out = {}
-    for sheet_name, df in mapped.items():
+    for sheet_name, df in data_dict.items():
+        new_df = df.copy()
         if sheet_name in NORMALIZE_MAP:
-            df = df.rename(columns=NORMALIZE_MAP[sheet_name])
-        out[sheet_name] = df
+            new_df = new_df.rename(columns=NORMALIZE_MAP[sheet_name])
+        out[sheet_name] = new_df
     return out
 
 def fmt_dates_for_table(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy with Date formatted as dd-mm-yyyy string for display."""
+    """
+    Return a copy with Date formatted as dd-mm-yyyy (string) for display in st.dataframe.
+    Keep original df (with date objects) for charts and filtering.
+    """
     if 'Date' in df.columns:
         d = df.copy()
+        # Convert date objects to string
         d['Date'] = pd.to_datetime(d['Date'], errors='coerce').dt.strftime('%d-%m-%Y')
         return d
     return df
 
 def chart_xaxis_ddmmyyyy(fig):
+    """Apply dd-mm-yyyy tick format on x axis."""
     fig.update_xaxes(tickformat="%d-%m-%Y")
     return fig
 
-# ---------------- Sidebar: Re-upload control ----------------
-st.sidebar.header("⚙️ Controls")
-if st.sidebar.button("🔄 Re-upload Excel"):
+# ---------------- Upload ----------------
+st.markdown("""
+<div class="upload-section">
+    <h3>📁 Upload Your Travel Agency Data</h3>
+    <p>Please upload an Excel file (.xlsx) containing the following sheets:</p>
+    <ul>
+        <li><strong>Daily_Summary</strong>: Date, Daily Sales, Cash Balance, Bank Balance</li>
+        <li><strong>Tickets_By_Airline</strong>: Date, Branch, Airline, Tickets Issued</li>
+        <li><strong>Airline_Sales</strong>: Date, Branch, Airline, Sales</li>
+        <li><strong>Staff_Sales</strong>: Date, Branch, Staff, Tickets Issued, Sales</li>
+        <li><strong>Bank_Balances</strong>: Date, Branch, Bank, Balance</li>
+    </ul>
+</div>
+""", unsafe_allow_html=True)
+
+uploaded_file = st.file_uploader(
+    "Choose an Excel file",
+    type=['xlsx', 'xls'],
+    help="Upload your travel agency data Excel file. Make sure it contains all required sheets."
+)
+
+# ---------------- Session init ----------------
+if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
     st.session_state.data_dict = {}
-    st.session_state.show_uploader = True
-    st.rerun()
 
-# ---------------- Upload block (hidden after success) ----------------
-if st.session_state.show_uploader:
-    uploader_ph = st.empty()
-    with uploader_ph.container():
-        # Minimal uploader (no label, no extra info)
-        uploaded_file = st.file_uploader(
-            label="",
-            type=['xlsx', 'xls'],
-            label_visibility="collapsed",
-            help=None
-        )
-        # (Optional) You can put muted guidance here if you want
-        # st.caption("Upload your Excel file to begin.")
+# ---------------- Process upload ----------------
+if uploaded_file is not None:
+    with st.spinner("📊 Processing your data..."):
+        mapped, available = load_excel_data(uploaded_file)
+        if mapped:
+            ok, msgs = validate_data_structure(mapped)
+            st.subheader("📋 Data Validation Results")
+            for m in msgs:
+                if m.startswith("✅"):
+                    st.markdown(f'<div class="success-message">{m}</div>', unsafe_allow_html=True)
+                elif m.startswith("❌"):
+                    st.markdown(f'<div class="error-message">{m}</div>', unsafe_allow_html=True)
+                else:
+                    st.info(m)
 
-        if uploaded_file is not None:
-            with st.spinner("📊 Loading data..."):
-                try:
-                    data_dict = load_excel_data(uploaded_file)
-                    if not data_dict:
-                        st.error("The workbook is missing expected sheets. Please check your file.")
-                    else:
-                        st.session_state.data_dict = data_dict
-                        st.session_state.data_loaded = True
-                        st.session_state.show_uploader = False  # Hide uploader from now on
-                        uploader_ph.empty()  # << Hides the entire upload UI & messages
-                        st.rerun()           # ensure clean state without the uploader block
-                except Exception as e:
-                    st.error(f"Failed to read the Excel file: {e}")
+            if ok:
+                normalized = normalize_column_names(mapped)
+                st.session_state.data_loaded = True
+                st.session_state.data_dict = normalized
+                st.success("🎉 Data loaded successfully! You can now view your dashboard below.")
+            else:
+                st.error("❌ Data validation failed. Please correct your Excel file and try again.")
+        else:
+            st.error("❌ Failed to read the Excel file.")
+
+# ---------------- Sample Template Download ----------------
+st.sidebar.header("📥 Download Sample Template")
+if st.sidebar.button("📄 Download Excel Template"):
+    sample_data = {
+        'Daily_Summary': pd.DataFrame({
+            'Date': [date.today()],
+            'Daily Sales': [150000],
+            'Cash Balance': [35000],
+            'Bank Balance': [115000]
+        }),
+        'Tickets_By_Airline': pd.DataFrame({
+            'Date': [date.today()] * 4,
+            'Branch': ['Main'] * 4,
+            'Airline': ['Saudi Airlines', 'Emirates', 'Qatar Airways', 'Etihad'],
+            'Tickets Issued': [40, 30, 20, 15]
+        }),
+        'Airline_Sales': pd.DataFrame({
+            'Date': [date.today()] * 4,
+            'Branch': ['Main'] * 4,
+            'Airline': ['Saudi Airlines', 'Emirates', 'Qatar Airways', 'Etihad'],
+            'Sales': [50000, 40000, 30000, 20000]
+        }),
+        'Staff_Sales': pd.DataFrame({
+            'Date': [date.today()] * 4,
+            'Branch': ['Main'] * 4,
+            'Staff': ['Ali', 'Sara', 'Ahmed', 'Lina'],
+            'Tickets Issued': [20, 30, 25, 25],
+            'Sales': [25000, 35000, 30000, 30000]
+        }),
+        'Bank_Balances': pd.DataFrame({
+            'Date': [date.today()] * 2,
+            'Branch': ['Main'] * 2,
+            'Bank': ['SNB', 'Al Rajhi'],
+            'Balance': [55000, 30000]
+        })
+    }
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        for sheet_name, df in sample_data.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    st.sidebar.download_button(
+        label="⬇️ Download Template",
+        data=output.getvalue(),
+        file_name="tawsif_travel_template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 # ---------------- Dashboard ----------------
 if st.session_state.data_loaded and st.session_state.data_dict:
@@ -166,10 +290,11 @@ if st.session_state.data_loaded and st.session_state.data_dict:
 
     st.sidebar.header("📊 Dashboard Filters")
 
-    # Date picker (safe: single vs range)
+    # Dates for picker
     all_dates = []
     for df in data_dict.values():
         if 'Date' in df.columns:
+            # df['Date'] already python date objects
             all_dates.extend([d for d in df['Date'] if pd.notna(d)])
 
     if all_dates:
@@ -179,12 +304,19 @@ if st.session_state.data_loaded and st.session_state.data_dict:
 
         if min_date == max_date:
             sel = st.sidebar.date_input(
-                "Select Date", value=max_date, min_value=min_date, max_value=max_date, key="single_date"
+                "Select Date",
+                value=max_date,
+                min_value=min_date,
+                max_value=max_date,
+                key="single_date"
             )
         else:
             sel = st.sidebar.date_input(
-                "Select Date Range", value=(default_start, max_date),
-                min_value=min_date, max_value=max_date, key="range_date"
+                "Select Date Range",
+                value=(default_start, max_date),
+                min_value=min_date,
+                max_value=max_date,
+                key="range_date"
             )
 
         if isinstance(sel, tuple) and len(sel) == 2:
@@ -195,7 +327,7 @@ if st.session_state.data_loaded and st.session_state.data_dict:
         end_date = date.today()
         start_date = end_date - timedelta(days=30)
 
-    # Branch filter
+    # Branch filter options
     branches = ['All']
     if 'Tickets_By_Airline' in data_dict and 'Branch' in data_dict['Tickets_By_Airline'].columns:
         branches.extend(list(pd.Series(data_dict['Tickets_By_Airline']['Branch']).dropna().unique()))
@@ -205,11 +337,14 @@ if st.session_state.data_loaded and st.session_state.data_dict:
     filtered_data = {}
     for name, df in data_dict.items():
         temp = df.copy()
+
         if 'Date' in temp.columns:
             mask = (temp['Date'] >= start_date) & (temp['Date'] <= end_date)
             temp = temp.loc[mask]
+
         if selected_branch != 'All' and 'Branch' in temp.columns:
             temp = temp[temp['Branch'] == selected_branch]
+
         filtered_data[name] = temp
 
     # ---------------- KPIs ----------------
@@ -256,7 +391,8 @@ if st.session_state.data_loaded and st.session_state.data_dict:
         st.subheader("📈 Daily Sales Trend")
         if 'Daily_Summary' in filtered_data and not filtered_data['Daily_Summary'].empty:
             df_sales = filtered_data['Daily_Summary'].copy()
-            df_sales['Date_dt'] = pd.to_datetime(df_sales['Date'])  # for plotly
+            # Convert date objects to datetime for Plotly, keep formatting on axis
+            df_sales['Date_dt'] = pd.to_datetime(df_sales['Date'])
             fig_sales = px.line(
                 df_sales, x='Date_dt', y='Daily Sales',
                 labels={'Daily Sales': 'Sales (SAR)', 'Date_dt': 'Date'},
@@ -274,7 +410,9 @@ if st.session_state.data_loaded and st.session_state.data_dict:
             airline_summary = (
                 filtered_data['Airline_Sales']
                 .groupby('Airline', dropna=True)['Sales']
-                .sum().reset_index().sort_values('Sales', ascending=False)
+                .sum()
+                .reset_index()
+                .sort_values('Sales', ascending=False)
             )
             fig_airline = px.bar(
                 airline_summary, x='Airline', y='Sales',
@@ -296,7 +434,9 @@ if st.session_state.data_loaded and st.session_state.data_dict:
                 filtered_data['Staff_Sales']
                 .groupby('Staff', dropna=True)
                 .agg({'Sales': 'sum', 'Tickets Issued': 'sum'})
-                .reset_index().sort_values('Sales', ascending=False).head(8)
+                .reset_index()
+                .sort_values('Sales', ascending=False)
+                .head(8)
             )
             fig_staff = px.bar(
                 staff_summary, x='Staff', y='Sales',
@@ -315,11 +455,13 @@ if st.session_state.data_loaded and st.session_state.data_dict:
             ticket_summary = (
                 filtered_data['Tickets_By_Airline']
                 .groupby('Airline', dropna=True)['Tickets Issued']
-                .sum().reset_index()
+                .sum()
+                .reset_index()
             )
             fig_tickets = px.pie(
                 ticket_summary, values='Tickets Issued', names='Airline',
-                title="Ticket Distribution", color_discrete_sequence=px.colors.qualitative.Set3
+                title="Ticket Distribution",
+                color_discrete_sequence=px.colors.qualitative.Set3
             )
             st.plotly_chart(fig_tickets, use_container_width=True)
         else:
@@ -336,14 +478,18 @@ if st.session_state.data_loaded and st.session_state.data_dict:
             df_bal['Date_dt'] = pd.to_datetime(df_bal['Date'])
             fig_balance = make_subplots(specs=[[{"secondary_y": True}]])
             fig_balance.add_trace(
-                go.Scatter(x=df_bal['Date_dt'], y=df_bal['Cash Balance'],
-                           name="Cash Balance", line=dict(color='green', width=2)),
-                secondary_y=False
+                go.Scatter(
+                    x=df_bal['Date_dt'], y=df_bal['Cash Balance'],
+                    name="Cash Balance", line=dict(color='green', width=2)
+                ),
+                secondary_y=False,
             )
             fig_balance.add_trace(
-                go.Scatter(x=df_bal['Date_dt'], y=df_bal['Bank Balance'],
-                           name="Bank Balance", line=dict(color='blue', width=2)),
-                secondary_y=True
+                go.Scatter(
+                    x=df_bal['Date_dt'], y=df_bal['Bank Balance'],
+                    name="Bank Balance", line=dict(color='blue', width=2)
+                ),
+                secondary_y=True,
             )
             fig_balance.update_xaxes(title_text="Date", tickformat="%d-%m-%Y")
             fig_balance.update_yaxes(title_text="Cash Balance (SAR)", secondary_y=False)
@@ -359,7 +505,9 @@ if st.session_state.data_loaded and st.session_state.data_dict:
             bank_summary = (
                 filtered_data['Bank_Balances']
                 .groupby('Bank', dropna=True)['Balance']
-                .sum().reset_index().sort_values('Balance', ascending=False)
+                .sum()
+                .reset_index()
+                .sort_values('Balance', ascending=False)
             )
             fig_banks = px.bar(
                 bank_summary, x='Bank', y='Balance',
@@ -412,6 +560,10 @@ if st.session_state.data_loaded and st.session_state.data_dict:
     """, unsafe_allow_html=True)
 
 else:
-    # If no data loaded and uploader is hidden (shouldn't happen), show a gentle nudge
-    if not st.session_state.show_uploader:
-        st.info("Click **🔄 Re-upload Excel** in the sidebar to upload a file.")
+    st.markdown("""
+    <div style='text-align: center; padding: 50px; color: #666;'>
+        <h2>👆 Please upload your Excel file to get started</h2>
+        <p>Upload your travel agency data file using the file uploader above to view your dashboard.</p>
+        <p>Don't have a file? Download the sample template from the sidebar to see the expected format.</p>
+    </div>
+    """, unsafe_allow_html=True)

@@ -5,7 +5,7 @@ import plotly.express as px
 import numpy as np
 from datetime import datetime
 
-# ========= Page configuration (sidebar collapsed) =========
+# ========= Page configuration =========
 st.set_page_config(
     page_title="LG Branch Summary Dashboard",
     page_icon="🏦",
@@ -133,9 +133,10 @@ def load_summary_data_from_file(uploaded_file):
         d = data[use_cols].copy()
         d.columns = ordered
 
-        # drop blank & totals rows
+        # drop totals & blanks (fixes double counting)
+        d = d[d["BANKS"].notna()]  # drop NaN first
         d["BANKS"] = d["BANKS"].astype(str).str.strip()
-        d = d[~d["BANKS"].str.upper().isin(["", "TOTAL", "TOTALS", "SUM"])]
+        d = d[~d["BANKS"].str.upper().isin(["", "TOTAL", "TOTALS", "SUM", "GRAND TOTAL"])]
 
         # numeric coercions
         for c in ["TOTAL FACILITIES", "AMOUNT UTILIZED", "OUTSTANDING"]:
@@ -292,6 +293,8 @@ def charts_for_subset(df_subset, title_prefix):
                 color_continuous_scale='Blues'
             )
             fig_bank.update_layout(height=400, title_x=0.5, xaxis_title="Bank", yaxis_title="Total Amount (SAR)", showlegend=False)
+            fig_bank.update_yaxes(tickformat=",.0f")
+            fig_bank.update_traces(hovertemplate="<b>%{x}</b><br>Total Amount: SAR %{y:,.0f}<extra></extra>")
             st.plotly_chart(fig_bank, use_container_width=True)
         else:
             st.info("Need BANK and AMOUNT columns for bar chart.")
@@ -300,6 +303,7 @@ def charts_for_subset(df_subset, title_prefix):
             bank_counts = df_subset.groupby('BANK').size().sort_values(ascending=False)
             fig_count = px.pie(values=bank_counts.values, names=bank_counts.index, title=f'{title_prefix} - Count by Bank')
             fig_count.update_layout(height=400, title_x=0.5)
+            fig_count.update_traces(hovertemplate="<b>%{label}</b><br>Count: %{value:,.0f}<extra></extra>")
             st.plotly_chart(fig_count, use_container_width=True)
         else:
             st.info("Need BANK column for pie chart.")
@@ -315,9 +319,8 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK', key_prefix=
             if group_cols:
                 agg_dict = {}
                 if 'AMOUNT' in df_subset.columns:
-                    agg_dict['AMOUNT'] = ['count', 'sum', 'mean']
-                if 'DAYS_TO_MATURE' in df_subset.columns:
-                    agg_dict['DAYS_TO_MATURE'] = 'mean'
+                    agg_dict['AMOUNT'] = ['count', 'sum']  # removed 'mean'
+                # no DAYS_TO_MATURE mean
                 if agg_dict:
                     summary_stats = df_subset.groupby(group_cols).agg(agg_dict).round(2)
                     summary_stats.columns = [
@@ -328,8 +331,6 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK', key_prefix=
                     summary_stats = summary_stats.reset_index().rename(columns={
                         'Amount Count': 'Count',
                         'Amount Sum': 'Total Amount',
-                        'Amount Mean': 'Avg Amount',
-                        'Days To Mature Mean': 'Avg Days to Mature'
                     })
                     st.dataframe(_style_money(summary_stats), use_container_width=True)
                 else:
@@ -367,7 +368,6 @@ def render_type_tab(df_filtered, gtype):
     if df_type.empty:
         st.warning(f"No data for **{gtype}**")
         return
-
     # 👉 TABLES FIRST, then charts
     render_summary_and_detailed_tables(df_type, 'BANK', f"type_{_std(gtype)}")
     charts_for_subset(df_type, gtype)
@@ -388,6 +388,7 @@ def create_maturity_analysis(df_detailed):
         maturity_dist = d['MATURITY_CATEGORY'].value_counts()
         fig_maturity = px.pie(values=maturity_dist.values, names=maturity_dist.index, title='LG Distribution by Time to Maturity')
         fig_maturity.update_layout(height=400, title_x=0.5)
+        fig_maturity.update_traces(hovertemplate="<b>%{label}</b><br>Count: %{value:,.0f}<extra></extra>")
         st.plotly_chart(fig_maturity, use_container_width=True)
     with col2:
         if 'BANK' in d.columns:
@@ -397,7 +398,30 @@ def create_maturity_analysis(df_detailed):
                 title='Maturity Distribution by Bank', barmode='stack'
             )
             fig_bank_maturity.update_layout(height=400, title_x=0.5)
+            fig_bank_maturity.update_yaxes(tickformat=",.0f")
+            fig_bank_maturity.update_traces(hovertemplate="<b>%{x}</b><br>Count: %{y:,.0f}<extra></extra>")
             st.plotly_chart(fig_bank_maturity, use_container_width=True)
+
+def render_current_month_maturity(df_all):
+    """Tab: current month maturities (tables first, then charts)."""
+    st.subheader("📅 Current Month Maturity")
+    if 'EXPIRY_DATE' not in df_all.columns:
+        st.info("No EXPIRY_DATE column found.")
+        return
+    today = pd.Timestamp.today().normalize()
+    start = today.replace(day=1)
+    end = (start + pd.offsets.MonthEnd(1))  # last day this month
+    d = df_all.copy()
+    d = d[(pd.to_datetime(d['EXPIRY_DATE'], errors='coerce') >= start) &
+          (pd.to_datetime(d['EXPIRY_DATE'], errors='coerce') <= end)]
+    if d.empty:
+        st.success("✅ No LGs are maturing this month.")
+        return
+
+    # Tables first
+    render_summary_and_detailed_tables(d, summary_by='BANK', key_prefix="curr_month")
+    # Then charts
+    charts_for_subset(d, f"Maturity in {start.strftime('%b %Y')}")
 
 # ========= Main =========
 def main():
@@ -453,20 +477,24 @@ def main():
         df_summary_filtered = _ensure_rates_only(df_summary_filtered)
         create_summary_metrics(df_summary_filtered)
 
-    # Tabs by Guarantee Type
+    # Tabs by Guarantee Type (+ Current Month Maturity)
     if 'GUARANTEE_TYPE' in df_detailed_filtered.columns:
         guarantee_types = df_detailed_filtered['GUARANTEE_TYPE'].dropna().unique().tolist()
         if guarantee_types:
             st.markdown('<div class="section-header">📋 Analysis by Guarantee Type</div>', unsafe_allow_html=True)
-            tabs = st.tabs(guarantee_types + ["🔄 All Types", "📊 Summary Tables"])
+            tabs = st.tabs(["📅 Current Month Maturity"] + guarantee_types + ["🔄 All Types", "📊 Summary Tables"])
+
+            # Current Month tab
+            with tabs[0]:
+                render_current_month_maturity(df_detailed_filtered)
 
             # Each guarantee type tab (TABLES FIRST, then CHARTS)
-            for i, gtype in enumerate(guarantee_types):
-                with tabs[i]:
+            for idx, gtype in enumerate(guarantee_types, start=1):
+                with tabs[idx]:
                     render_type_tab(df_detailed_filtered, gtype)
 
-            # All Types tab — TABLES first, then charts + maturity
-            with tabs[len(guarantee_types)]:
+            # All Types tab — TABLES first, then charts + maturity analysis
+            with tabs[len(guarantee_types) + 1]:
                 st.subheader("🔄 All Guarantee Types (Combined)")
                 render_summary_and_detailed_tables(
                     df_detailed_filtered, summary_by='GUARANTEE_TYPE', key_prefix="all_types"
@@ -475,7 +503,7 @@ def main():
                 create_maturity_analysis(df_detailed_filtered)
 
             # Summary Tables tab
-            with tabs[len(guarantee_types) + 1]:
+            with tabs[len(guarantee_types) + 2]:
                 st.subheader("📊 Data Tables")
                 tab1, tab2 = st.tabs(["📈 Summary Data", "📋 Detailed Transactions"])
                 with tab1:

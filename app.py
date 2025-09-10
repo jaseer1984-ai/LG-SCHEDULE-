@@ -10,7 +10,7 @@ SOURCE_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vS0uwaNWlivxOLwohf
 
 # ========= Page configuration =========
 st.set_page_config(
-    page_title="LG Branch Summary Dashboard",
+    page_title="LETTER OF GUARANTEE",   # ← renamed
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -420,7 +420,8 @@ def render_current_month_maturity(df_all):
 
 # ========= Main =========
 def main():
-    st.markdown('<div class="main-header">🏦 LG Branch Summary Dashboard 2025</div>', unsafe_allow_html=True)
+    # Renamed header
+    st.markdown('<div class="main-header">🏦 LETTER OF GUARANTEE</div>', unsafe_allow_html=True)
 
     # --- Top-right refresh button (no source text) ---
     create_source_section()
@@ -523,14 +524,7 @@ def main():
         st.warning("⚠️ GUARANTEE_TYPE column not found in the data. Please check your Excel file structure.")
         st.write("Available columns:", df_detailed_filtered.columns.tolist())
 
-    # Footer (discreet)
-    st.markdown("---")
-    st.markdown(
-        f"<div style='text-align:center;color:#666;'>LG Branch Summary Dashboard • Data as of {datetime.now().strftime('%d-%m-%Y')}</div>",
-        unsafe_allow_html=True
-    )
+    # ➜ Footer removed (hidden), per your request.
 
 if __name__ == "__main__":
     main()
-
-

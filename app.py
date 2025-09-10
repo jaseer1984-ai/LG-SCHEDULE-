@@ -10,7 +10,7 @@ SOURCE_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vS0uwaNWlivxOLwohf
 
 # ========= Page configuration =========
 st.set_page_config(
-    page_title="LETTER OF GUARANTEE",   # ← renamed
+    page_title="LETTER OF GUARANTEE",
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -43,11 +43,9 @@ st.markdown("""
 
 # ========= Helpers =========
 def _std(s: str) -> str:
-    """Normalize header to UPPER_SNAKE."""
     return str(s).strip().upper().replace(" ", "_").replace("-", "_")
 
 def _clean_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop empty rows/cols; if headers look 'UNNAMED', promote the best row as header."""
     d = df.copy()
     d = d.dropna(how='all').dropna(axis=1, how='all')
     if any(str(c).upper().startswith("UNNAMED") for c in d.columns):
@@ -68,11 +66,6 @@ def _format_dates_for_display(df: pd.DataFrame, cols=('ISSUE_DATE', 'EXPIRY_DATE
     return d
 
 def _style_table(df: pd.DataFrame):
-    """
-    Format:
-      - Money-ish columns -> commas, no decimals
-      - DAYS / COUNT columns -> integers, no decimals
-    """
     if df is None or df.empty:
         return df
     fmt = {}
@@ -87,7 +80,6 @@ def _style_table(df: pd.DataFrame):
     return df.style.format(fmt)
 
 def _ensure_rates_only(df_sum: pd.DataFrame) -> pd.DataFrame:
-    """Only compute percentage rates if source columns exist. Never fabricate totals."""
     d = df_sum.copy()
     if {"AMOUNT_UTILIZED", "TOTAL_FACILITIES"}.issubset(d.columns):
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -97,13 +89,9 @@ def _ensure_rates_only(df_sum: pd.DataFrame) -> pd.DataFrame:
             d["OUTSTANDING_RATE"] = (d["OUTSTANDING"] / d["TOTAL_FACILITIES"] * 100).round(2)
     return d
 
-# ========= Data loaders (from SOURCE_URL) =========
+# ========= Data loaders from SOURCE_URL =========
 @st.cache_data
 def load_summary_data_from_source(source_url: str):
-    """
-    Robustly extract the BANKS summary block from the 'Summary' sheet:
-    headers anywhere like [BANKS | TOTAL FACILITIES | AMOUNT UTILIZED | OUTSTANDING].
-    """
     wanted = ["BANKS", "TOTAL FACILITIES", "AMOUNT UTILIZED", "OUTSTANDING"]
 
     def _find_summary_block(df_raw: pd.DataFrame):
@@ -126,7 +114,6 @@ def load_summary_data_from_source(source_url: str):
                 return r, cols_map
         return None, None
 
-    # Read raw (no header) and detect the block
     raw = pd.read_excel(source_url, sheet_name="Summary", header=None)
     start_row, cmap = _find_summary_block(raw)
     if start_row is not None:
@@ -136,12 +123,10 @@ def load_summary_data_from_source(source_url: str):
         d = data[use_cols].copy()
         d.columns = ordered
 
-        # drop totals & blanks (fixes double counting)
         d = d[d["BANKS"].notna()]
         d["BANKS"] = d["BANKS"].astype(str).str.strip()
         d = d[~d["BANKS"].str.upper().isin(["", "TOTAL", "TOTALS", "SUM", "GRAND TOTAL"])]
 
-        # numeric coercions
         for c in ["TOTAL FACILITIES", "AMOUNT UTILIZED", "OUTSTANDING"]:
             if c in d.columns:
                 d[c] = pd.to_numeric(d[c], errors="coerce")
@@ -155,7 +140,6 @@ def load_summary_data_from_source(source_url: str):
         if "BANKS" in d.columns and "AMOUNT_UTILIZED" in d.columns:
             return d
 
-    # Fallback: build minimal summary from detailed
     df_det = pd.read_excel(source_url, sheet_name="LG BRANCH SUMMARY_2025", usecols="A:K")
     df_det = _clean_frame(df_det)
     df_det.columns = [_std(c) for c in df_det.columns]
@@ -172,7 +156,6 @@ def load_summary_data_from_source(source_url: str):
 
 @st.cache_data
 def load_detailed_data_from_source(source_url: str):
-    """Load detailed data (LG BRANCH SUMMARY_2025, A:K), robust to messy sheets."""
     try:
         df = pd.read_excel(source_url, sheet_name='LG BRANCH SUMMARY_2025', usecols="A:K")
         df = _clean_frame(df)
@@ -203,7 +186,6 @@ def load_detailed_data_from_source(source_url: str):
         if 'BRANCH' in df.columns: df['BRANCH'] = df['BRANCH'].fillna('Main Branch')
         if 'CURRENCY' in df.columns: df['CURRENCY'] = df['CURRENCY'].fillna('SAR')
 
-        # keep essential rows only
         df = df.dropna(subset=['BANK', 'GUARANTEE_TYPE'])
         df = df[df['BANK'].astype(str).str.strip() != '']
         df = df[df['GUARANTEE_TYPE'].astype(str).str.strip() != '']
@@ -236,9 +218,38 @@ def load_detailed_data_from_source(source_url: str):
             st.error(f"Fallback also failed: {str(e2)}")
             return None
 
+@st.cache_data
+def load_branch_utilized_from_summary(source_url: str) -> pd.DataFrame:
+    """
+    Read the Summary sheet's two-column table [BRANCH | AMOUNT] and
+    return columns: BRANCH, AMOUNT_UTILIZED.
+    """
+    raw = pd.read_excel(source_url, sheet_name="Summary", header=None)
+    found = None
+    for r in range(len(raw)):
+        row = raw.iloc[r].tolist()
+        norm = { _std(v): i for i, v in enumerate(row) if pd.notna(v) and str(v).strip() != "" }
+        # allow AMOUNT / AMOUNT_... headers
+        amt_key = next((k for k in norm.keys() if k.startswith("AMOUNT")), None)
+        if "BRANCH" in norm and amt_key:
+            found = (r, norm["BRANCH"], norm[amt_key]); break
+    if not found:
+        return pd.DataFrame(columns=["BRANCH", "AMOUNT_UTILIZED"])
+    r, c_br, c_amt = found
+    t = raw.iloc[r+1:, [c_br, c_amt]].copy()
+    t.columns = ["BRANCH", "AMOUNT"]
+    t["BRANCH"] = t["BRANCH"].astype(str).str.strip()
+    t = t[t["BRANCH"].notna()]
+    t = t[t["BRANCH"] != ""]
+    t = t[~t["BRANCH"].str.upper().isin(["TOTAL", "TOTALS", "GRAND TOTAL", "SUM"])]
+    t["AMOUNT"] = t["AMOUNT"].astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False)
+    t["AMOUNT"] = t["AMOUNT"].replace({"-": 0, "": 0, "nan": 0, "None": 0})
+    t["AMOUNT"] = pd.to_numeric(t["AMOUNT"], errors="coerce").fillna(0)
+    t = t.rename(columns={"AMOUNT": "AMOUNT_UTILIZED"}).reset_index(drop=True)
+    return t
+
 # ========= UI helpers =========
 def create_source_section():
-    """Top-right refresh button (no source text shown)."""
     cols = st.columns([8, 1])
     with cols[1]:
         if st.button("🔄 Refresh data", use_container_width=True):
@@ -247,34 +258,24 @@ def create_source_section():
 
 def create_summary_metrics(df):
     st.markdown('<div class="section-header">📊 Key Performance Indicators</div>', unsafe_allow_html=True)
-
     total_fac = df['TOTAL_FACILITIES'].sum() if 'TOTAL_FACILITIES' in df.columns else None
     total_used = df['AMOUNT_UTILIZED'].sum()  if 'AMOUNT_UTILIZED'  in df.columns else None
     total_outs = df['OUTSTANDING'].sum()      if 'OUTSTANDING'      in df.columns else None
-
     util_pct  = (total_used/total_fac*100) if (total_fac and total_used is not None and total_fac != 0) else None
     avail_pct = (total_outs/total_fac*100) if (total_fac and total_outs is not None and total_fac != 0) else None
-
     if 'UTILIZATION_RATE' in df.columns and df['UTILIZATION_RATE'].notna().any():
         avg_util = df['UTILIZATION_RATE'].mean()
     elif util_pct is not None:
         avg_util = util_pct
     else:
         avg_util = None
-
     c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Total Facilities", f"SAR {total_fac:,.0f}" if total_fac is not None else "—")
-    with c2:
-        st.metric("Amount Utilized",
-                  f"SAR {total_used:,.0f}" if total_used is not None else "—",
-                  delta=(f"{util_pct:.1f}% of total" if util_pct is not None else None))
-    with c3:
-        st.metric("Outstanding Amount",
-                  f"SAR {total_outs:,.0f}" if total_outs is not None else "—",
-                  delta=(f"{avail_pct:.1f}% available" if avail_pct is not None else None))
-    with c4:
-        st.metric("Avg Utilization Rate", f"{avg_util:.1f}%" if avg_util is not None else "—")
+    with c1: st.metric("Total Facilities", f"SAR {total_fac:,.0f}" if total_fac is not None else "—")
+    with c2: st.metric("Amount Utilized", f"SAR {total_used:,.0f}" if total_used is not None else "—",
+                       delta=(f"{util_pct:.1f}% of total" if util_pct is not None else None))
+    with c3: st.metric("Outstanding Amount", f"SAR {total_outs:,.0f}" if total_outs is not None else "—",
+                       delta=(f"{avail_pct:.1f}% available" if avail_pct is not None else None))
+    with c4: st.metric("Avg Utilization Rate", f"{avg_util:.1f}%" if avg_util is not None else "—")
 
 def charts_for_subset(df_subset, title_prefix):
     col1, col2 = st.columns(2)
@@ -306,7 +307,6 @@ def charts_for_subset(df_subset, title_prefix):
 
 def render_summary_and_detailed_tables(df_subset, summary_by='BANK', key_prefix='main'):
     tab_s, tab_d = st.tabs(["📈 Summary", "📋 Detailed"])
-
     with tab_s:
         if df_subset.empty:
             st.warning("No data.")
@@ -315,7 +315,7 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK', key_prefix=
             if group_cols:
                 agg_dict = {}
                 if 'AMOUNT' in df_subset.columns:
-                    agg_dict['AMOUNT'] = ['count', 'sum']  # no averages
+                    agg_dict['AMOUNT'] = ['count', 'sum']
                 if agg_dict:
                     summary_stats = df_subset.groupby(group_cols).agg(agg_dict).round(2)
                     summary_stats.columns = [
@@ -332,19 +332,16 @@ def render_summary_and_detailed_tables(df_subset, summary_by='BANK', key_prefix=
                     st.info("No numeric columns available to summarize.")
             else:
                 st.info("No valid grouping column to summarize.")
-
     with tab_d:
         if df_subset.empty:
             st.warning("No rows to display.")
         else:
             df_display = _format_dates_for_display(df_subset, cols=('ISSUE_DATE', 'EXPIRY_DATE'))
             st.dataframe(_style_table(df_display), use_container_width=True)
-
             export_df = df_subset.copy()
             for c in ('ISSUE_DATE', 'EXPIRY_DATE'):
                 if c in export_df.columns:
                     export_df[c] = pd.to_datetime(export_df[c], errors='coerce').dt.strftime('%d-%m-%Y')
-
             st.download_button(
                 label="📥 Download (current tab) CSV",
                 data=export_df.to_csv(index=False),
@@ -363,7 +360,6 @@ def render_type_tab(df_filtered, gtype):
     if df_type.empty:
         st.warning(f"No data for **{gtype}**")
         return
-    # 👉 TABLES FIRST, then charts
     render_summary_and_detailed_tables(df_type, 'BANK', f"type_{_std(gtype)}")
     charts_for_subset(df_type, gtype)
 
@@ -398,42 +394,37 @@ def create_maturity_analysis(df_detailed):
             st.plotly_chart(fig_bank_maturity, use_container_width=True)
 
 def render_current_month_maturity(df_all):
-    """Tab: current month maturities (tables first, then charts)."""
     st.subheader("📅 Current Month Maturity")
     if 'EXPIRY_DATE' not in df_all.columns:
         st.info("No EXPIRY_DATE column found.")
         return
     today = pd.Timestamp.today().normalize()
     start = today.replace(day=1)
-    end = (start + pd.offsets.MonthEnd(1))  # last day this month
+    end = (start + pd.offsets.MonthEnd(1))
     d = df_all.copy()
     d = d[(pd.to_datetime(d['EXPIRY_DATE'], errors='coerce') >= start) &
           (pd.to_datetime(d['EXPIRY_DATE'], errors='coerce') <= end)]
     if d.empty:
         st.success("✅ No LGs are maturing this month.")
         return
-
-    # Tables first
     render_summary_and_detailed_tables(d, summary_by='BANK', key_prefix="curr_month")
-    # Then charts
     charts_for_subset(d, f"Maturity in {start.strftime('%b %Y')}")
 
 # ========= Main =========
 def main():
-    # Renamed header
     st.markdown('<div class="main-header">🏦 LETTER OF GUARANTEE</div>', unsafe_allow_html=True)
 
-    # --- Top-right refresh button (no source text) ---
     create_source_section()
 
-    # Load data from SOURCE_URL
     df_summary = load_summary_data_from_source(SOURCE_URL)
     df_detailed = load_detailed_data_from_source(SOURCE_URL)
+    df_branch_util = load_branch_utilized_from_summary(SOURCE_URL)
+
     if df_summary is None or df_detailed is None or df_detailed.empty:
         st.error("No usable data found. Check the source sheet names/structure.")
         st.stop()
 
-    # --- Simple filters (RADIO): Branch + Bank ---
+    # --- Filters: Branch + Bank (radio) ---
     st.markdown('<div class="section-header">🔧 Filters</div>', unsafe_allow_html=True)
     cols = st.columns(2)
     with cols[0]:
@@ -447,14 +438,14 @@ def main():
             banks_radio += sorted(df_detailed['BANK'].dropna().unique().tolist())
         selected_bank_radio = st.radio("Bank", options=banks_radio, horizontal=True)
 
-    # Apply filters (detailed)
+    # Apply filters to detailed
     df_detailed_filtered = df_detailed.copy()
     if selected_branch != 'All' and 'BRANCH' in df_detailed_filtered.columns:
         df_detailed_filtered = df_detailed_filtered[df_detailed_filtered['BRANCH'] == selected_branch]
     if selected_bank_radio != 'All' and 'BANK' in df_detailed_filtered.columns:
         df_detailed_filtered = df_detailed_filtered[df_detailed_filtered['BANK'] == selected_bank_radio]
 
-    # Filter summary (if a bank is chosen)
+    # Filter summary by bank if chosen
     try:
         df_summary_cols = {c.upper(): c for c in df_summary.columns}
         bank_hdr = df_summary_cols.get("BANKS") or df_summary_cols.get("BANK")
@@ -465,29 +456,31 @@ def main():
     except Exception:
         df_summary_filtered = df_summary.copy()
 
-    # KPIs block
+    # KPIs (overall)
     if not df_summary_filtered.empty:
         df_summary_filtered = _ensure_rates_only(df_summary_filtered)
         create_summary_metrics(df_summary_filtered)
 
-    # Tabs by Guarantee Type (+ Current Month Maturity)
+    # ---- NEW: Amount Utilized (Branch) metric from Summary sheet ----
+    if selected_branch != 'All' and df_branch_util is not None and not df_branch_util.empty:
+        match = df_branch_util[df_branch_util['BRANCH'].str.upper() == selected_branch.upper()]
+        if match.empty:
+            match = df_branch_util[df_branch_util['BRANCH'].str.upper().str.contains(selected_branch.upper(), na=False)]
+        branch_amt = float(match['AMOUNT_UTILIZED'].iloc[0]) if not match.empty else None
+        st.markdown('<div class="section-header">🏢 Selected Branch Summary</div>', unsafe_allow_html=True)
+        st.metric("Amount Utilized (Branch)", f"SAR {branch_amt:,.0f}" if branch_amt is not None else "—")
+
+    # Tabs by Guarantee Type (All Types FIRST now)
     if 'GUARANTEE_TYPE' in df_detailed_filtered.columns:
         guarantee_types = df_detailed_filtered['GUARANTEE_TYPE'].dropna().unique().tolist()
         if guarantee_types:
             st.markdown('<div class="section-header">📋 Analysis by Guarantee Type</div>', unsafe_allow_html=True)
-            tabs = st.tabs(["📅 Current Month Maturity"] + guarantee_types + ["🔄 All Types", "📊 Summary Tables"])
 
-            # Current Month tab
+            tab_titles = ["🔄 All Types", "📅 Current Month Maturity"] + guarantee_types + ["📊 Summary Tables"]
+            tabs = st.tabs(tab_titles)
+
+            # 0) All Types (tables first, then charts & maturity analysis)
             with tabs[0]:
-                render_current_month_maturity(df_detailed_filtered)
-
-            # Each guarantee type tab (TABLES FIRST, then CHARTS)
-            for idx, gtype in enumerate(guarantee_types, start=1):
-                with tabs[idx]:
-                    render_type_tab(df_detailed_filtered, gtype)
-
-            # All Types tab — TABLES first, then charts + maturity analysis
-            with tabs[len(guarantee_types) + 1]:
                 st.subheader("🔄 All Guarantee Types (Combined)")
                 render_summary_and_detailed_tables(
                     df_detailed_filtered, summary_by='GUARANTEE_TYPE', key_prefix="all_types"
@@ -495,8 +488,17 @@ def main():
                 charts_for_subset(df_detailed_filtered, "All Types")
                 create_maturity_analysis(df_detailed_filtered)
 
-            # Summary Tables tab
-            with tabs[len(guarantee_types) + 2]:
+            # 1) Current Month Maturity
+            with tabs[1]:
+                render_current_month_maturity(df_detailed_filtered)
+
+            # 2..N) Individual guarantee type tabs
+            for idx, gtype in enumerate(guarantee_types, start=2):
+                with tabs[idx]:
+                    render_type_tab(df_detailed_filtered, gtype)
+
+            # Last) Summary tables
+            with tabs[len(tab_titles) - 1]:
                 st.subheader("📊 Data Tables")
                 tab1, tab2 = st.tabs(["📈 Summary Data", "📋 Detailed Transactions"])
                 with tab1:
@@ -524,7 +526,7 @@ def main():
         st.warning("⚠️ GUARANTEE_TYPE column not found in the data. Please check your Excel file structure.")
         st.write("Available columns:", df_detailed_filtered.columns.tolist())
 
-    # ➜ Footer removed (hidden), per your request.
+    # Footer removed (hidden)
 
 if __name__ == "__main__":
     main()
